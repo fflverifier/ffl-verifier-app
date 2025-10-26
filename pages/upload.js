@@ -53,9 +53,7 @@ export default function UploadPage() {
           );
         }
 
-        if (!match) {
-          return { ...r, Status: "UNKNOWN ❔" };
-        }
+        if (!match) return { ...r, Status: "UNKNOWN ❔" };
 
         // Compare fields (Importer/Country = compare-if-both-present)
         const coreFields = ["manufacturer", "model", "type", "caliber"];
@@ -71,10 +69,7 @@ export default function UploadPage() {
         });
 
         const mismatches = [...mismatchCore, ...mismatchOpt];
-
-        if (mismatches.length > 0) {
-          return { ...r, Status: "NOT VERIFIED ⚠️" };
-        }
+        if (mismatches.length > 0) return { ...r, Status: "NOT VERIFIED ⚠️" };
 
         return { ...r, Status: "VERIFIED ✅" };
       });
@@ -102,6 +97,25 @@ export default function UploadPage() {
     link.click();
   };
 
+  // ---------- summary counts ----------
+  const stats = (() => {
+    const total = results.length;
+    if (!total) return { total: 0, verified: 0, notVerified: 0, unknown: 0, pv: 0, pnv: 0, pu: 0 };
+    const verified = results.filter((r) => String(r.Status).includes("VERIFIED ✅")).length;
+    const notVerified = results.filter((r) => String(r.Status).includes("NOT VERIFIED")).length;
+    const unknown = results.filter((r) => String(r.Status).includes("UNKNOWN")).length;
+    const pct = (n) => Math.round((n / total) * 100);
+    return {
+      total,
+      verified,
+      notVerified,
+      unknown,
+      pv: pct(verified),
+      pnv: pct(notVerified),
+      pu: pct(unknown),
+    };
+  })();
+
   // ---------- UI ----------
   return (
     <main style={{ fontFamily: "sans-serif", padding: "40px" }}>
@@ -122,8 +136,32 @@ export default function UploadPage() {
         <div style={{ marginTop: 20 }}>
           <h3>Results ({results.length} rows)</h3>
 
+          {/* Summary bar */}
+          <div
+            style={{
+              display: "flex",
+              gap: 16,
+              flexWrap: "wrap",
+              margin: "8px 0 14px 0",
+              fontSize: 14,
+            }}
+          >
+            <span style={{ padding: "6px 10px", background: "#e8f5e9", border: "1px solid #c8e6c9", borderRadius: 6 }}>
+              VERIFIED: <strong>{stats.verified}</strong> ({stats.pv}%)
+            </span>
+            <span style={{ padding: "6px 10px", background: "#fff8e1", border: "1px solid #ffe082", borderRadius: 6 }}>
+              NOT VERIFIED: <strong>{stats.notVerified}</strong> ({stats.pnv}%)
+            </span>
+            <span style={{ padding: "6px 10px", background: "#eeeeee", border: "1px solid #cccccc", borderRadius: 6 }}>
+              UNKNOWN: <strong>{stats.unknown}</strong> ({stats.pu}%)
+            </span>
+            <span style={{ padding: "6px 10px", border: "1px dashed #bbb", borderRadius: 6 }}>
+              TOTAL: <strong>{stats.total}</strong>
+            </span>
+          </div>
+
           {/* Legend */}
-          <div style={{ marginTop: 10, marginBottom: 10, display: "flex", gap: 16, fontSize: 14 }}>
+          <div style={{ marginTop: 6, marginBottom: 10, display: "flex", gap: 16, fontSize: 14 }}>
             <span>
               <span
                 style={{
