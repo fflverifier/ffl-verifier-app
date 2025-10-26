@@ -1,100 +1,48 @@
-import { useState } from "react";
-import Papa from "papaparse";
-import { supabase } from "../lib/supabaseClient";
+{results.length > 0 && (
+  <div style={{ marginTop: "20px" }}>
+    <h3>Results ({results.length} rows)</h3>
 
-export default function UploadPage() {
-  const [rows, setRows] = useState([]);
-  const [results, setResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+    {/* Legend */}
+    <div style={{ marginTop: 10, marginBottom: 10, display: "flex", gap: 16, fontSize: 14 }}>
+      <span>
+        <span style={{ display: "inline-block", width: 12, height: 12, background: "#e8f5e9", border: "1px solid #c8e6c9", marginRight: 6 }} />
+        VERIFIED
+      </span>
+      <span>
+        <span style={{ display: "inline-block", width: 12, height: 12, background: "#fff8e1", border: "1px solid #ffe082", marginRight: 6 }} />
+        NOT VERIFIED
+      </span>
+      <span>
+        <span style={{ display: "inline-block", width: 12, height: 12, background: "#eeeeee", border: "1px solid #cccccc", marginRight: 6 }} />
+        UNKNOWN
+      </span>
+    </div>
 
-  const handleFile = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => setRows(results.data),
-      error: (err) => setError(err.message),
-    });
-  };
-
-  const verifyData = async () => {
-    setLoading(true);
-    try {
-      const { data: catalog } = await supabase.from("catalog").select("*");
-      if (!catalog) throw new Error("No catalog data found.");
-
-      const norm = (s) => (s || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
-      const checked = rows.map((r) => {
-        const upc = norm(r.UPC || r.upc);
-        const key = norm((r.Manufacturer || "") + (r.Model || "") + (r.Type || "") + (r.Caliber || ""));
-
-        let match = null;
-        if (upc) {
-          match = catalog.find((c) => norm(c.upc) === upc);
-        } else {
-          match = catalog.find(
-            (c) => norm(c.manufacturer + c.model + c.type + c.caliber) === key
-          );
-        }
-
-        if (!match) return { ...r, Status: "UNKNOWN ❔" };
-
-        const fields = ["manufacturer", "model", "type", "caliber", "importer", "country"];
-        const mismatches = fields.filter((f) => {
-          const uploadVal = norm(r[f] || "");
-          const catalogVal = norm(match[f] || "");
-          return uploadVal && catalogVal && uploadVal !== catalogVal;
-        });
-
-        if (mismatches.length > 0) return { ...r, Status: "NOT VERIFIED ⚠️" };
-        return { ...r, Status: "VERIFIED ✅" };
-      });
-
-      setResults(checked);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <main style={{ fontFamily: "sans-serif", padding: "40px" }}>
-      <h1>FFL Verifier — Upload Tool</h1>
-      <input type="file" accept=".csv" onChange={handleFile} />
-      <button
-        onClick={verifyData}
-        disabled={rows.length === 0 || loading}
-        style={{ marginLeft: "10px", padding: "6px 12px", cursor: "pointer" }}
-      >
-        {loading ? "Verifying..." : "Run Verification"}
-      </button>
-      {error && <p style={{ color: "red" }}>{error}</p>}
-      {results.length > 0 && (
-        <div style={{ marginTop: "20px" }}>
-          <h3>Results ({results.length} rows)</h3>
-          <table border="1" cellPadding="6" style={{ borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {Object.keys(results[0]).map((k) => (
-                  <th key={k}>{k}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((r, i) => (
-                <tr key={i}>
-                  {Object.values(r).map((v, j) => (
-                    <td key={j}>{v}</td>
-                  ))}
-                </tr>
+    {/* Table */}
+    <table border="1" cellPadding="6" style={{ borderCollapse: "collapse", width: "100%" }}>
+      <thead>
+        <tr>
+          {Object.keys(results[0]).map((k) => (
+            <th key={k} style={{ textAlign: "left" }}>{k}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {results.map((r, i) => {
+          const statusText = (r.Status || "").toString();
+          const bg =
+            statusText.includes("VERIFIED") ? "#e8f5e9" :
+            statusText.includes("NOT VERIFIED") ? "#fff8e1" :
+            "#eeeeee";
+          return (
+            <tr key={i} style={{ background: bg }}>
+              {Object.values(r).map((v, j) => (
+                <td key={j}>{v}</td>
               ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </main>
-  );
-}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  </div>
+)}
