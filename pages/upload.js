@@ -48,7 +48,8 @@ export default function UploadPage() {
           match = catalog.find((c) => norm(c.upc) === upc);
         } else {
           match = catalog.find(
-            (c) => norm((c.manufacturer ?? "") + (c.model ?? "") + (c.type ?? "") + (c.caliber ?? "")) === key
+            (c) =>
+              norm((c.manufacturer ?? "") + (c.model ?? "") + (c.type ?? "") + (c.caliber ?? "")) === key
           );
         }
 
@@ -60,7 +61,9 @@ export default function UploadPage() {
         const coreFields = ["manufacturer", "model", "type", "caliber"];
         const optFields = ["importer", "country"];
 
-        const mismatchCore = coreFields.filter((f) => norm(r[f] ?? r[f?.toUpperCase?.()] ?? "") !== norm(match[f] ?? ""));
+        const mismatchCore = coreFields.filter(
+          (f) => norm(r[f] ?? r[f?.toUpperCase?.()] ?? "") !== norm(match[f] ?? "")
+        );
         const mismatchOpt = optFields.filter((f) => {
           const uploadVal = norm(r[f] ?? r[f?.toUpperCase?.()] ?? "");
           const catalogVal = norm(match[f] ?? "");
@@ -82,6 +85,21 @@ export default function UploadPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // ---------- download CSV helper ----------
+  const downloadCSV = () => {
+    if (results.length === 0) return;
+    const headers = Object.keys(results[0]);
+    const rowsCsv = results.map((r) =>
+      headers.map((h) => JSON.stringify(r[h] ?? "")).join(",")
+    );
+    const csvContent = [headers.join(","), ...rowsCsv].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "ffl-verifier-results.csv";
+    link.click();
   };
 
   // ---------- UI ----------
@@ -147,6 +165,14 @@ export default function UploadPage() {
             </span>
           </div>
 
+          {/* Download button */}
+          <button
+            onClick={downloadCSV}
+            style={{ marginBottom: 10, padding: "6px 12px", cursor: "pointer" }}
+          >
+            ⬇️ Download Results CSV
+          </button>
+
           {/* Table */}
           <table border="1" cellPadding="6" style={{ borderCollapse: "collapse", width: "100%" }}>
             <thead>
@@ -162,7 +188,11 @@ export default function UploadPage() {
               {results.map((r, i) => {
                 const statusText = String(r.Status || "");
                 const bg =
-                  statusText.includes("VERIFIED") ? "#e8f5e9" : statusText.includes("NOT VERIFIED") ? "#fff8e1" : "#eeeeee";
+                  statusText.includes("VERIFIED")
+                    ? "#e8f5e9"
+                    : statusText.includes("NOT VERIFIED")
+                    ? "#fff8e1"
+                    : "#eeeeee";
                 return (
                   <tr key={i} style={{ background: bg }}>
                     {Object.values(r).map((v, j) => (
