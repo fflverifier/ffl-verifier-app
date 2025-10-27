@@ -12,8 +12,8 @@ export default function UploadPage() {
 
   // ---------- helpers ----------
   const norm = (s) => (s || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
-  const normDigits = (s) => (s || "").toString().replace(/\D/g, ""); // digits only for UPC/EAN
-  const strip0 = (s) => s.replace(/^0+/, "");
+  const normDigits = (s) => (s || "").toString().replace(/\D/g, ""); // digits only
+  const strip0 = (s) => (s || "").replace(/^0+/, "");
 
   // Pull the first non-empty value from possible header aliases
   const firstVal = (row, names) => {
@@ -49,55 +49,118 @@ export default function UploadPage() {
     });
   };
 
-  // ---------- verify against Supabase catalog (UPC map first, then ATF key) ----------
+  // ---------- verify against Supabase (bulk UPC fetch, duplicate-safe) ----------
   const verifyData = async () => {
     setLoading(true);
     setError("");
     setDebugInfo(null);
     try {
-      const { data: catalog, error: catErr } = await supabase.from("catalog").select("*");
-      if (catErr) throw catErr;
-      if (!catalog || catalog.length === 0)
-        throw new Error("Catalog is empty or not readable (check RLS / project keys).");
+      // 1) Build the set of UPC keys we actually need to look up
+      const upcKeys = new Set();
+      const previewUploadUPCs = [];
 
-      // Build fast UPC lookup maps from catalog
-      const upcMap = new Map();       // digits (as-is)
-      const upcStrictMap = new Map(); // digits with leading zeros stripped
-      for (const cRow of catalog) {
-        const raw = cRow?.upc ?? "";
-        const d = normDigits(String(raw).trim());
+      for (const r of rows) {
+        const raw = firstVal(r, ALIAS.upc);
+        const d = normDigits(raw);
         if (!d) continue;
-        if (!upcMap.has(d)) upcMap.set(d, cRow);
-        const s0 = strip0(d);
-        if (!upcStrictMap.has(s0)) upcStrictMap.set(s0, cRow);
+        upcKeys.add(d);
+        // keep for debug preview
+        if (previewUploadUPCs.length < 10) {
+          previewUploadUPCs.push({ raw, digits: d, strict: strip0(d) });
+        }
       }
 
+      const keys = Array.from(upcKeys);
+      if (keys.length === 0) {
+        setError("No UPC/EAN values found in the upload.");
+        setLoading(false);
+        return;
+      }
+
+      // 2) Bulk fetch only those UPCs from the catalog (avoid full table scan)
+      //    If your catalog stores raw UPCs as plain 12-digit text, this is sufficient.
+      const { data: catalog, error: catErr } = await supabase
+        .from("catalog")
+        .select("id, upc, manufacturer, model, type, caliber, importer, country")
+        .in("upc", keys);
+
+      if (catErr) throw catErr;
+
+      // 3) Build maps:
+      //    - upcMap: UPC digits -> array of candidate catalog rows (handle duplicates)
+      //    - matchKeyMap: ATF fields combo -> array (for fallback within this fetched subset)
+      const upcMap = new Map(); // key: digits
+      const matchKeyMap = new Map();
       const catKey = (cRow) =>
         norm(`${cRow.manufacturer || ""}${cRow.model || ""}${cRow.type || ""}${cRow.caliber || ""}`);
 
+      const previewCatalogUPCs = [];
+      if (catalog && catalog.length) {
+        for (const cRow of catalog) {
+          const d = normDigits(cRow?.upc ?? "");
+          if (!d) continue;
+
+          if (!upcMap.has(d)) upcMap.set(d, []);
+          upcMap.get(d).push(cRow);
+
+          const mk = catKey(cRow);
+          if (!matchKeyMap.has(mk)) matchKeyMap.set(mk, []);
+          matchKeyMap.get(mk).push(cRow);
+
+          if (previewCatalogUPCs.length < 10) {
+            previewCatalogUPCs.push({ raw: cRow.upc ?? "", digits: d, strict: strip0(d) });
+          }
+        }
+      }
+
+      // Scoring to choose the best candidate when duplicates exist
+      const scoreCandidate = (uploadRow, c) => {
+        let s = 0;
+        if (norm(firstVal(uploadRow, ALIAS.manufacturer)) === norm(c.manufacturer)) s += 3;
+        if (norm(firstVal(uploadRow, ALIAS.model)) === norm(c.model)) s += 3;
+        if (norm(firstVal(uploadRow, ALIAS.type)) === norm(c.type)) s += 2;
+        if (norm(firstVal(uploadRow, ALIAS.caliber)) === norm(c.caliber)) s += 2;
+
+        const uImp = norm(firstVal(uploadRow, ALIAS.importer));
+        const uCty = norm(firstVal(uploadRow, ALIAS.country));
+        const cImp = norm(c.importer);
+        const cCty = norm(c.country);
+
+        if (uImp && cImp && uImp === cImp) s += 1;
+        if (uCty && cCty && uCty === cCty) s += 1;
+        return s;
+      };
+
+      // 4) Verify each upload row
       const checked = rows.map((r) => {
         const upcRaw = firstVal(r, ALIAS.upc);
-        const upcDigits = normDigits(upcRaw);
-        const upcStrict = strip0(upcDigits);
-
+        const d = normDigits(upcRaw);
         const m = firstVal(r, ALIAS.manufacturer);
         const mo = firstVal(r, ALIAS.model);
         const t = firstVal(r, ALIAS.type);
         const c = firstVal(r, ALIAS.caliber);
-        const key = norm(`${m}${mo}${t}${c}`);
+        const mk = norm(`${m}${mo}${t}${c}`);
 
-        // 1) UPC-first using maps
-        let match = null;
-        if (upcDigits) match = upcMap.get(upcDigits) || upcStrictMap.get(upcStrict);
-
-        // 2) Fallback to ATF combined key if no UPC match
-        if (!match) {
-          match = catalog.find((cRow) => catKey(cRow) === key);
+        let candidates = [];
+        if (d && upcMap.has(d)) {
+          candidates = upcMap.get(d);
+        } else if (mk && matchKeyMap.has(mk)) {
+          // fallback within the fetched subset only
+          candidates = matchKeyMap.get(mk);
         }
 
-        if (!match) return { ...r, Status: "UNKNOWN ❔" };
+        if (!candidates || candidates.length === 0) {
+          return { ...r, Status: "UNKNOWN ❔" };
+        }
 
-        // Compare fields ONLY when both upload and catalog values exist
+        // Choose the best candidate
+        const best = candidates
+          .map((cRow) => ({ cRow, score: scoreCandidate(r, cRow) }))
+          .sort((a, b) => b.score - a.score)[0]?.cRow;
+
+        if (!best) return { ...r, Status: "UNKNOWN ❔" };
+
+        // Field-by-field comparison (only when both sides have a value)
         const cmpPairs = [
           ["manufacturer", m],
           ["model", mo],
@@ -108,7 +171,7 @@ export default function UploadPage() {
         ];
         const mismatches = cmpPairs.filter(([field, uploadVal]) => {
           const u = norm(uploadVal);
-          const v = norm(match[field] || "");
+          const v = norm(best[field] || "");
           return u && v && u !== v;
         });
 
@@ -118,26 +181,22 @@ export default function UploadPage() {
 
       setResults(checked);
 
-      // Debug info panel
-      const uploadUPCs = rows.slice(0, 10).map((r) => {
-        const raw = firstVal(r, ALIAS.upc);
-        const d = normDigits(raw);
-        const s0 = strip0(d);
-        return { raw, digits: d, strict: s0 };
-      });
-      const catalogUPCs = catalog.slice(0, 10).map((c) => {
-        const raw = c.upc ?? "";
-        const d = normDigits(String(raw));
-        const s0 = strip0(d);
-        return { raw, digits: d, strict: s0 };
-      });
+      // 5) Debug panel
       const unknownWithUPC = checked.filter(
         (r) => String(r.Status).includes("UNKNOWN") && normDigits(firstVal(r, ALIAS.upc)) !== ""
       );
+
+      // Count upload UPCs that had multiple catalog candidates (duplicates)
+      let duplicateHitCount = 0;
+      for (const k of upcMap.keys()) {
+        if (upcMap.get(k)?.length > 1) duplicateHitCount++;
+      }
+
       setDebugInfo({
-        uploadPreview: uploadUPCs,
-        catalogPreview: catalogUPCs,
+        uploadPreview: previewUploadUPCs,
+        catalogPreview: previewCatalogUPCs,
         unknownUPCCount: unknownWithUPC.length,
+        duplicateCatalogUpcKeys: duplicateHitCount,
         unknownUPCSamples: unknownWithUPC.slice(0, 5).map((r) => ({
           upc: firstVal(r, ALIAS.upc),
           manufacturer: firstVal(r, ALIAS.manufacturer),
@@ -274,9 +333,7 @@ export default function UploadPage() {
             <thead>
               <tr>
                 {Object.keys(results[0]).map((k) => (
-                  <th key={k} style={{ textAlign: "left" }}>
-                    {k}
-                  </th>
+                  <th key={k} style={{ textAlign: "left" }}>{k}</th>
                 ))}
               </tr>
             </thead>
@@ -306,6 +363,7 @@ export default function UploadPage() {
               <summary style={{ cursor: "pointer", fontWeight: 600 }}>Debug</summary>
               <div style={{ fontFamily: "monospace", fontSize: 12, marginTop: 10 }}>
                 <div>Unknown rows with a UPC: <strong>{debugInfo.unknownUPCCount}</strong></div>
+                <div>Catalog UPC keys with duplicates: <strong>{debugInfo.duplicateCatalogUpcKeys}</strong></div>
                 <div style={{ marginTop: 8 }}>
                   <div>Uploaded UPCs (first 10):</div>
                   <pre>{JSON.stringify(debugInfo.uploadPreview, null, 2)}</pre>
