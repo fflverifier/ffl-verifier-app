@@ -24,16 +24,23 @@ export default function UploadPage() {
     return "";
   };
 
-  // Accepted header aliases
+  // Accepted header aliases (canonical names listed first)
   const ALIAS = {
     upc: ["UPC", "upc", "Upc", "EAN", "ean", "Barcode", "barcode"],
+
+    // ATF core fields
     manufacturer: ["Manufacturer", "manufacturer", "MFR", "mfr", "Brand", "brand", "Maker", "maker"],
-    importer: ["Importer", "importer"],
-    country: ["Country of Manufacture", "country", "Country", "CountryOfManufacture"],
     model: ["Model", "model"],
     type: ["Type", "type", "Category", "category"],
     caliber: ["Caliber", "caliber", "Cal", "cal"],
+
+    // ATF optional fields
+    importer: ["Importer", "importer"],
+    country: ["Country of Manufacture", "Country", "country", "CountryOfManufacture"],
   };
+
+  const buildAtfKey = (obj) =>
+    norm(`${obj.manufacturer || ""}${obj.model || ""}${obj.type || ""}${obj.caliber || ""}`);
 
   // ---------- file parse ----------
   const handleFile = (e) => {
@@ -42,110 +49,126 @@ export default function UploadPage() {
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
-      // Trim header names to avoid "UPC " vs "UPC"
-      transformHeader: (h) => h.trim(),
+      transformHeader: (h) => h.trim(), // avoid "UPC " vs "UPC"
       complete: (res) => setRows(res.data),
       error: (err) => setError(err.message),
     });
   };
 
-  // ---------- verify against Supabase (bulk UPC fetch, duplicate-safe) ----------
+  // ---------- verify (UPC-first; if no UPC then ATF fields only) ----------
   const verifyData = async () => {
     setLoading(true);
     setError("");
     setDebugInfo(null);
+
     try {
-      // 1) Build the set of UPC keys we actually need to look up
+      // Collect UPCs to fetch; detect if any rows lack UPC (to enable ATF-only path)
       const upcKeys = new Set();
+      let needAtfOnly = false;
       const previewUploadUPCs = [];
 
       for (const r of rows) {
         const raw = firstVal(r, ALIAS.upc);
         const d = normDigits(raw);
-        if (!d) continue;
-        upcKeys.add(d);
-        // keep for debug preview
-        if (previewUploadUPCs.length < 10) {
-          previewUploadUPCs.push({ raw, digits: d, strict: strip0(d) });
+        if (d) {
+          upcKeys.add(d);
+          if (previewUploadUPCs.length < 10) {
+            previewUploadUPCs.push({ raw, digits: d, strict: strip0(d) });
+          }
+        } else {
+          needAtfOnly = true;
         }
       }
 
-      const keys = Array.from(upcKeys);
-      if (keys.length === 0) {
-        setError("No UPC/EAN values found in the upload.");
-        setLoading(false);
-        return;
-      }
-
-      // 2) Bulk fetch only those UPCs from the catalog (avoid full table scan)
-      //    If your catalog stores raw UPCs as plain 12-digit text, this is sufficient.
-      const { data: catalog, error: catErr } = await supabase
+      // ---- 1) Fetch only UPCs we need (fast path)
+      let { data: catalogUpc, error: upcErr } = await supabase
         .from("catalog")
         .select("id, upc, manufacturer, model, type, caliber, importer, country")
-        .in("upc", keys);
+        .in("upc", Array.from(upcKeys));
 
-      if (catErr) throw catErr;
+      if (upcErr) throw upcErr;
+      catalogUpc ||= [];
 
-      // 3) Build maps:
-      //    - upcMap: UPC digits -> array of candidate catalog rows (handle duplicates)
-      //    - matchKeyMap: ATF fields combo -> array (for fallback within this fetched subset)
-      const upcMap = new Map(); // key: digits
-      const matchKeyMap = new Map();
-      const catKey = (cRow) =>
-        norm(`${cRow.manufacturer || ""}${cRow.model || ""}${cRow.type || ""}${cRow.caliber || ""}`);
+      // Build maps from UPC subset
+      const upcMap = new Map(); // UPC digits -> array of catalog rows (handle duplicates)
+      const matchKeyMap = new Map(); // ATF core key -> array (will be extended if we fetch full catalog)
 
       const previewCatalogUPCs = [];
-      if (catalog && catalog.length) {
-        for (const cRow of catalog) {
-          const d = normDigits(cRow?.upc ?? "");
-          if (!d) continue;
+      for (const cRow of catalogUpc) {
+        const d = normDigits(cRow?.upc ?? "");
+        if (!d) continue;
 
-          if (!upcMap.has(d)) upcMap.set(d, []);
-          upcMap.get(d).push(cRow);
+        if (!upcMap.has(d)) upcMap.set(d, []);
+        upcMap.get(d).push(cRow);
 
-          const mk = catKey(cRow);
-          if (!matchKeyMap.has(mk)) matchKeyMap.set(mk, []);
-          matchKeyMap.get(mk).push(cRow);
+        const mk = buildAtfKey(cRow);
+        if (!matchKeyMap.has(mk)) matchKeyMap.set(mk, []);
+        matchKeyMap.get(mk).push(cRow);
 
-          if (previewCatalogUPCs.length < 10) {
-            previewCatalogUPCs.push({ raw: cRow.upc ?? "", digits: d, strict: strip0(d) });
-          }
+        if (previewCatalogUPCs.length < 10) {
+          previewCatalogUPCs.push({ raw: cRow.upc ?? "", digits: d, strict: strip0(d) });
         }
       }
 
-      // Scoring to choose the best candidate when duplicates exist
+      // ---- 2) If any upload rows *lack UPC*, fetch minimal full catalog once to support ATF-only fallback
+      if (needAtfOnly) {
+        const { data: catalogAll, error: allErr } = await supabase
+          .from("catalog")
+          .select("id, upc, manufacturer, model, type, caliber, importer, country");
+        if (allErr) throw allErr;
+
+        for (const cRow of catalogAll || []) {
+          const mk = buildAtfKey(cRow);
+          if (!matchKeyMap.has(mk)) matchKeyMap.set(mk, []);
+          matchKeyMap.get(mk).push(cRow);
+        }
+      }
+
+      // ---------- scoring to pick best candidate when duplicates exist ----------
       const scoreCandidate = (uploadRow, c) => {
         let s = 0;
-        if (norm(firstVal(uploadRow, ALIAS.manufacturer)) === norm(c.manufacturer)) s += 3;
-        if (norm(firstVal(uploadRow, ALIAS.model)) === norm(c.model)) s += 3;
-        if (norm(firstVal(uploadRow, ALIAS.type)) === norm(c.type)) s += 2;
-        if (norm(firstVal(uploadRow, ALIAS.caliber)) === norm(c.caliber)) s += 2;
 
-        const uImp = norm(firstVal(uploadRow, ALIAS.importer));
-        const uCty = norm(firstVal(uploadRow, ALIAS.country));
-        const cImp = norm(c.importer);
-        const cCty = norm(c.country);
+        // Core ATF fields weigh more
+        const uMf = norm(firstVal(uploadRow, ALIAS.manufacturer));
+        const uMo = norm(firstVal(uploadRow, ALIAS.model));
+        const uTy = norm(firstVal(uploadRow, ALIAS.type));
+        const uCa = norm(firstVal(uploadRow, ALIAS.caliber));
+        if (uMf && uMf === norm(c.manufacturer)) s += 3;
+        if (uMo && uMo === norm(c.model))        s += 3;
+        if (uTy && uTy === norm(c.type))         s += 2;
+        if (uCa && uCa === norm(c.caliber))      s += 2;
 
-        if (uImp && cImp && uImp === cImp) s += 1;
-        if (uCty && cCty && uCty === cCty) s += 1;
+        // Optional ATF fields (only if both present)
+        const uIm = norm(firstVal(uploadRow, ALIAS.importer));
+        const uCo = norm(firstVal(uploadRow, ALIAS.country));
+        if (uIm && uIm === norm(c.importer)) s += 1;
+        if (uCo && uCo === norm(c.country))  s += 1;
+
         return s;
       };
 
-      // 4) Verify each upload row
+      // ---------- verify each upload row ----------
       const checked = rows.map((r) => {
         const upcRaw = firstVal(r, ALIAS.upc);
         const d = normDigits(upcRaw);
-        const m = firstVal(r, ALIAS.manufacturer);
-        const mo = firstVal(r, ALIAS.model);
-        const t = firstVal(r, ALIAS.type);
-        const c = firstVal(r, ALIAS.caliber);
-        const mk = norm(`${m}${mo}${t}${c}`);
 
+        const m  = firstVal(r, ALIAS.manufacturer);
+        const mo = firstVal(r, ALIAS.model);
+        const t  = firstVal(r, ALIAS.type);
+        const c  = firstVal(r, ALIAS.caliber);
+        const im = firstVal(r, ALIAS.importer);
+        const co = firstVal(r, ALIAS.country);
+
+        const mk = buildAtfKey({ manufacturer: m, model: mo, type: t, caliber: c });
+
+        // A) UPC-first if provided
         let candidates = [];
         if (d && upcMap.has(d)) {
           candidates = upcMap.get(d);
-        } else if (mk && matchKeyMap.has(mk)) {
-          // fallback within the fetched subset only
+        }
+
+        // B) If no UPC or no UPC match, fall back to ATF fields only (core fields)
+        if ((!d || candidates.length === 0) && mk && matchKeyMap.has(mk)) {
           candidates = matchKeyMap.get(mk);
         }
 
@@ -153,40 +176,46 @@ export default function UploadPage() {
           return { ...r, Status: "UNKNOWN ❔" };
         }
 
-        // Choose the best candidate
+        // Choose the best candidate by score
         const best = candidates
           .map((cRow) => ({ cRow, score: scoreCandidate(r, cRow) }))
           .sort((a, b) => b.score - a.score)[0]?.cRow;
 
         if (!best) return { ...r, Status: "UNKNOWN ❔" };
 
-        // Field-by-field comparison (only when both sides have a value)
-        const cmpPairs = [
-          ["manufacturer", m],
-          ["model", mo],
-          ["type", t],
-          ["caliber", c],
-          ["importer", firstVal(r, ALIAS.importer)],
-          ["country", firstVal(r, ALIAS.country)],
-        ];
-        const mismatches = cmpPairs.filter(([field, uploadVal]) => {
-          const u = norm(uploadVal);
-          const v = norm(best[field] || "");
-          return u && v && u !== v;
-        });
+        // Comparison rules:
+        // - Core ATF fields must match when both sides have values
+        // - Optional ATF fields only compared if both have values
+        const cmp = (u, v) => {
+          const nu = norm(u);
+          const nv = norm(v);
+          return !nu || !nv || nu === nv; // missing = non-conflicting
+        };
 
-        if (mismatches.length > 0) return { ...r, Status: "NOT VERIFIED ⚠️" };
-        return { ...r, Status: "VERIFIED ✅" };
+        const coreOk =
+          cmp(m,  best.manufacturer) &&
+          cmp(mo, best.model) &&
+          cmp(t,  best.type) &&
+          cmp(c,  best.caliber);
+
+        const optionalOk =
+          (!im || !best.importer || cmp(im, best.importer)) &&
+          (!co || !best.country  || cmp(co, best.country));
+
+        if (coreOk && optionalOk) {
+          return { ...r, Status: "VERIFIED ✅" };
+        }
+
+        return { ...r, Status: "NOT VERIFIED ⚠️" };
       });
 
       setResults(checked);
 
-      // 5) Debug panel
+      // ---------- debug info ----------
       const unknownWithUPC = checked.filter(
         (r) => String(r.Status).includes("UNKNOWN") && normDigits(firstVal(r, ALIAS.upc)) !== ""
       );
 
-      // Count upload UPCs that had multiple catalog candidates (duplicates)
       let duplicateHitCount = 0;
       for (const k of upcMap.keys()) {
         if (upcMap.get(k)?.length > 1) duplicateHitCount++;
@@ -194,16 +223,14 @@ export default function UploadPage() {
 
       setDebugInfo({
         uploadPreview: previewUploadUPCs,
-        catalogPreview: previewCatalogUPCs,
+        catalogPreview: (catalogUpc || []).slice(0, 10).map((c) => ({
+          raw: c.upc ?? "",
+          digits: normDigits(c.upc ?? ""),
+          strict: strip0(normDigits(c.upc ?? "")),
+        })),
         unknownUPCCount: unknownWithUPC.length,
         duplicateCatalogUpcKeys: duplicateHitCount,
-        unknownUPCSamples: unknownWithUPC.slice(0, 5).map((r) => ({
-          upc: firstVal(r, ALIAS.upc),
-          manufacturer: firstVal(r, ALIAS.manufacturer),
-          model: firstVal(r, ALIAS.model),
-          type: firstVal(r, ALIAS.type),
-          caliber: firstVal(r, ALIAS.caliber),
-        })),
+        atfOnlyRows: rows.filter((r) => !normDigits(firstVal(r, ALIAS.upc))).length,
       });
     } catch (e) {
       setError(e.message || "Verification failed.");
@@ -364,6 +391,7 @@ export default function UploadPage() {
               <div style={{ fontFamily: "monospace", fontSize: 12, marginTop: 10 }}>
                 <div>Unknown rows with a UPC: <strong>{debugInfo.unknownUPCCount}</strong></div>
                 <div>Catalog UPC keys with duplicates: <strong>{debugInfo.duplicateCatalogUpcKeys}</strong></div>
+                <div>Rows verified by ATF-only (no UPC): <strong>{debugInfo.atfOnlyRows}</strong></div>
                 <div style={{ marginTop: 8 }}>
                   <div>Uploaded UPCs (first 10):</div>
                   <pre>{JSON.stringify(debugInfo.uploadPreview, null, 2)}</pre>
@@ -372,12 +400,6 @@ export default function UploadPage() {
                   <div>Catalog UPCs (first 10):</div>
                   <pre>{JSON.stringify(debugInfo.catalogPreview, null, 2)}</pre>
                 </div>
-                {debugInfo.unknownUPCSamples?.length > 0 && (
-                  <div style={{ marginTop: 8 }}>
-                    <div>Sample UNKNOWN rows with UPC:</div>
-                    <pre>{JSON.stringify(debugInfo.unknownUPCSamples, null, 2)}</pre>
-                  </div>
-                )}
               </div>
             </details>
           )}
