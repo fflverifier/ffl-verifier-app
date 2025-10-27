@@ -8,6 +8,7 @@ export default function UploadPage() {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [debugInfo, setDebugInfo] = useState(null);
 
   // ---------- helpers ----------
   const norm = (s) => (s || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -43,6 +44,8 @@ export default function UploadPage() {
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      // IMPORTANT: trim header names to avoid "UPC " vs "UPC"
+      transformHeader: (h) => h.trim(),
       complete: (res) => setRows(res.data),
       error: (err) => setError(err.message),
     });
@@ -52,6 +55,7 @@ export default function UploadPage() {
   const verifyData = async () => {
     setLoading(true);
     setError("");
+    setDebugInfo(null);
     try {
       const { data: catalog, error: catErr } = await supabase.from("catalog").select("*");
       if (catErr) throw catErr;
@@ -77,24 +81,8 @@ export default function UploadPage() {
             const dbUPCStr = String(cRow.upc ?? "").trim();
             const dbDigits = normDigits(dbUPCStr);
             const dbStrict = dbDigits.replace(/^0+/, "");
-            return (
-              dbDigits === upcDigits ||
-              dbStrict === upcStrict
-            );
+            return dbDigits === upcDigits || dbStrict === upcStrict;
           });
-
-          // Enable logging when /upload?debug=1
-const debug = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("debug");
-if (!match && debug) {
-  // eslint-disable-next-line no-console
-  console.log("UPC not matched", {
-    upcRaw,
-    uploadDigits: upcDigits,
-    uploadStrict: upcStrict,
-    sampleCatalogUPCs: catalog.slice(0, 5).map(c => c.upc),
-  });
-}
-
         }
 
         // 2) Fallback to ATF combined key if no UPC match
@@ -128,6 +116,40 @@ if (!match && debug) {
       });
 
       setResults(checked);
+
+      // --------- Build debug info panel ---------
+      const uploadUPCs = rows
+        .map((r) => {
+          const raw = firstVal(r, ALIAS.upc);
+          const digits = normDigits(raw);
+          const strict = digits.replace(/^0+/, "");
+          return { raw, digits, strict };
+        })
+        .filter((x) => x.raw !== "" || x.digits !== "");
+
+      const catalogUPCs = (catalog || []).slice(0, 50).map((c) => {
+        const raw = c.upc ?? "";
+        const digits = normDigits(raw);
+        const strict = digits.replace(/^0+/, "");
+        return { raw, digits, strict };
+      });
+
+      const unknownWithUPC = checked.filter(
+        (r) => String(r.Status).includes("UNKNOWN") && normDigits(firstVal(r, ALIAS.upc)) !== ""
+      );
+
+      setDebugInfo({
+        uploadPreview: uploadUPCs.slice(0, 10),
+        catalogPreview: catalogUPCs.slice(0, 10),
+        unknownUPCCount: unknownWithUPC.length,
+        unknownUPCSamples: unknownWithUPC.slice(0, 5).map((r) => ({
+          upc: firstVal(r, ALIAS.upc),
+          manufacturer: firstVal(r, ALIAS.manufacturer),
+          model: firstVal(r, ALIAS.model),
+          type: firstVal(r, ALIAS.type),
+          caliber: firstVal(r, ALIAS.caliber),
+        })),
+      });
     } catch (e) {
       setError(e.message || "Verification failed.");
     } finally {
@@ -286,6 +308,30 @@ if (!match && debug) {
               })}
             </tbody>
           </table>
+
+          {/* Debug panel */}
+          {debugInfo && (
+            <details style={{ marginTop: 20 }}>
+              <summary style={{ cursor: "pointer", fontWeight: 600 }}>Debug</summary>
+              <div style={{ fontFamily: "monospace", fontSize: 12, marginTop: 10 }}>
+                <div>Unknown rows with a UPC: <strong>{debugInfo.unknownUPCCount}</strong></div>
+                <div style={{ marginTop: 8 }}>
+                  <div>Uploaded UPCs (first 10):</div>
+                  <pre>{JSON.stringify(debugInfo.uploadPreview, null, 2)}</pre>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <div>Catalog UPCs (first 10):</div>
+                  <pre>{JSON.stringify(debugInfo.catalogPreview, null, 2)}</pre>
+                </div>
+                {debugInfo.unknownUPCSamples?.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <div>Sample UNKNOWN rows with UPC:</div>
+                    <pre>{JSON.stringify(debugInfo.unknownUPCSamples, null, 2)}</pre>
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
         </div>
       )}
     </main>
