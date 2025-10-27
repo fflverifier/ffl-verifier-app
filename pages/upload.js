@@ -83,15 +83,18 @@ export default function UploadPage() {
             );
           });
 
-          if (!match && process.env.NODE_ENV !== "production") {
-            // Helpful console log during debugging
-            // eslint-disable-next-line no-console
-            console.log("UPC not matched:", upcRaw, {
-              uploadDigits: upcDigits,
-              uploadStrict: upcStrict,
-              sampleCatalogUPCs: catalog.slice(0, 5).map(c => c.upc),
-            });
-          }
+          // Enable logging when /upload?debug=1
+const debug = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("debug");
+if (!match && debug) {
+  // eslint-disable-next-line no-console
+  console.log("UPC not matched", {
+    upcRaw,
+    uploadDigits: upcDigits,
+    uploadStrict: upcStrict,
+    sampleCatalogUPCs: catalog.slice(0, 5).map(c => c.upc),
+  });
+}
+
         }
 
         // 2) Fallback to ATF combined key if no UPC match
