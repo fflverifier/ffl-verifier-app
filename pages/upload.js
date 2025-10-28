@@ -210,7 +210,7 @@ import { useState } from "react";
         const checked = rows.map((r) => {
           const upcPick = pickField(r, ALIAS.upc);
           const manufacturerPick = pickField(r, ALIAS.manufacturer);
-          const modelPick = pickField(r, ALIAS.model);
+          the modelPick = pickField(r, ALIAS.model);
           const typePick = pickField(r, ALIAS.type);
           const caliberPick = pickField(r, ALIAS.caliber);
           const importerPick = pickField(r, ALIAS.importer);
@@ -554,7 +554,7 @@ import { useState } from "react";
                     <div>Uploaded UPCs (first 10):</div>
                     <pre>{JSON.stringify(debugInfo.uploadPreview, null, 2)}</pre>
                   </div>
-                  <div style{lng=""> marginTop: 8 }}>
+                  <div style={{ marginTop: 8 }}>
                     <div>Catalog UPCs (first 10):</div>
                     <pre>{JSON.stringify(debugInfo.catalogPreview, null, 2)}</pre>
                   </div>
