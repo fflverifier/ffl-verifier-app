@@ -16,12 +16,22 @@ export default function UploadPage() {
   const strip0 = (s) => (s || "").replace(/^0+/, "");
 
   // Pull the first non-empty value from possible header aliases
-  const firstVal = (row, names) => {
+  const pickField = (row, names) => {
     for (const n of names) {
-      const v = row[n] ?? row[n?.toLowerCase?.()] ?? row[n?.toUpperCase?.()];
-      if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+      const key = n;
+      const candidates = [key, key?.toLowerCase?.(), key?.toUpperCase?.()].filter(Boolean);
+      for (const candidate of candidates) {
+        const value = row[candidate];
+        if (value !== undefined && value !== null && String(value).trim() !== "") {
+          return { value, key: candidate };
+        }
+      }
     }
-    return "";
+    return { value: "", key: null };
+  };
+
+  const firstVal = (row, names) => {
+    return pickField(row, names).value;
   };
 
   // Accepted header aliases (canonical names listed first)
@@ -38,6 +48,8 @@ export default function UploadPage() {
     importer: ["Importer", "importer"],
     country: ["Country of Manufacture", "Country", "country", "CountryOfManufacture"],
   };
+
+  const META_KEY = "__meta";
 
   const buildAtfKey = (obj) =>
     norm(`${obj.manufacturer || ""}${obj.model || ""}${obj.type || ""}${obj.caliber || ""}`);
@@ -149,17 +161,35 @@ export default function UploadPage() {
 
       // ---------- verify each upload row ----------
       const checked = rows.map((r) => {
-        const upcRaw = firstVal(r, ALIAS.upc);
+        const upcPick = pickField(r, ALIAS.upc);
+        const manufacturerPick = pickField(r, ALIAS.manufacturer);
+        const modelPick = pickField(r, ALIAS.model);
+        const typePick = pickField(r, ALIAS.type);
+        const caliberPick = pickField(r, ALIAS.caliber);
+        const importerPick = pickField(r, ALIAS.importer);
+        const countryPick = pickField(r, ALIAS.country);
+
+        const upcRaw = upcPick.value;
+        const m = manufacturerPick.value;
+        const mo = modelPick.value;
+        const t = typePick.value;
+        const c = caliberPick.value;
+        const im = importerPick.value;
+        const co = countryPick.value;
+
         const d = normDigits(upcRaw);
-
-        const m  = firstVal(r, ALIAS.manufacturer);
-        const mo = firstVal(r, ALIAS.model);
-        const t  = firstVal(r, ALIAS.type);
-        const c  = firstVal(r, ALIAS.caliber);
-        const im = firstVal(r, ALIAS.importer);
-        const co = firstVal(r, ALIAS.country);
-
         const mk = buildAtfKey({ manufacturer: m, model: mo, type: t, caliber: c });
+
+        const baseRow = {
+          ...r,
+          UPC: upcRaw,
+          Manufacturer: m,
+          Model: mo,
+          Type: t,
+          Caliber: c,
+          Importer: im,
+          Country: co,
+        };
 
         // A) UPC-first if provided
         let candidates = [];
@@ -173,7 +203,7 @@ export default function UploadPage() {
         }
 
         if (!candidates || candidates.length === 0) {
-          return { ...r, Status: "UNKNOWN ❔" };
+          return { ...baseRow, Status: "UNKNOWN ❔", __meta: {} };
         }
 
         // Choose the best candidate by score
@@ -181,32 +211,86 @@ export default function UploadPage() {
           .map((cRow) => ({ cRow, score: scoreCandidate(r, cRow) }))
           .sort((a, b) => b.score - a.score)[0]?.cRow;
 
-        if (!best) return { ...r, Status: "UNKNOWN ❔" };
+        if (!best) return { ...baseRow, Status: "UNKNOWN ❔", __meta: {} };
 
-        // Comparison rules:
-        // - Core ATF fields must match when both sides have values
-        // - Optional ATF fields only compared if both have values
-        const cmp = (u, v) => {
-          const nu = norm(u);
-          const nv = norm(v);
-          return !nu || !nv || nu === nv; // missing = non-conflicting
+        const meta = {};
+        const mismatchedCanonicals = new Set();
+        const toStr = (val) => {
+          if (val === undefined || val === null) return "";
+          return String(val);
         };
 
-        const coreOk =
-          cmp(m,  best.manufacturer) &&
-          cmp(mo, best.model) &&
-          cmp(t,  best.type) &&
-          cmp(c,  best.caliber);
+        const evaluateField = ({ canonicalKey, pick, expected, comparator }) => {
+          const actualStr = toStr(pick.value).trim();
+          const expectedStr = toStr(expected).trim();
+          const hasActual = actualStr !== "";
+          const hasExpected = expectedStr !== "";
 
-        const optionalOk =
-          (!im || !best.importer || cmp(im, best.importer)) &&
-          (!co || !best.country  || cmp(co, best.country));
+          let match = true;
+          let reason = "";
 
-        if (coreOk && optionalOk) {
-          return { ...r, Status: "VERIFIED ✅" };
+          if (!hasActual && !hasExpected) {
+            match = true;
+          } else if (!hasActual && hasExpected) {
+            match = false;
+            reason = "Missing value";
+          } else if (hasActual && hasExpected) {
+            const comparatorFn = comparator || ((a, b) => norm(a) === norm(b));
+            match = comparatorFn(actualStr, expectedStr);
+            if (!match) {
+              reason = `Expected "${expectedStr}"`;
+            }
+          } else if (hasActual && !hasExpected) {
+            match = true; // Nothing reliable to compare against
+          }
+
+          if (!match) {
+            const keysToMark = new Set();
+            if (canonicalKey) keysToMark.add(canonicalKey);
+            if (pick.key && pick.key !== canonicalKey) keysToMark.add(pick.key);
+            if (keysToMark.size === 0) keysToMark.add(canonicalKey || pick.key || "Field");
+
+            mismatchedCanonicals.add(canonicalKey || pick.key || "Field");
+            keysToMark.forEach((key) => {
+              meta[key] = {
+                state: "mismatch",
+                expected: expectedStr,
+                actual: actualStr,
+                reason: reason || "Mismatch",
+              };
+            });
+          }
+        };
+
+        if (d) {
+          evaluateField({
+            canonicalKey: "UPC",
+            pick: upcPick,
+            expected: best.upc,
+            comparator: (a, b) => normDigits(a) === normDigits(b),
+          });
         }
 
-        return { ...r, Status: "NOT VERIFIED ⚠️" };
+        [
+          { canonicalKey: "Manufacturer", pick: manufacturerPick, expected: best.manufacturer },
+          { canonicalKey: "Model", pick: modelPick, expected: best.model },
+          { canonicalKey: "Type", pick: typePick, expected: best.type },
+          { canonicalKey: "Caliber", pick: caliberPick, expected: best.caliber },
+          { canonicalKey: "Importer", pick: importerPick, expected: best.importer },
+          { canonicalKey: "Country", pick: countryPick, expected: best.country },
+        ].forEach((config) => evaluateField(config));
+
+        const mismatchSummary = Array.from(mismatchedCanonicals);
+        const status =
+          mismatchSummary.length === 0
+            ? (d ? "VERIFIED ✅ (UPC & ATF match)" : "VERIFIED ✅ (ATF match)")
+            : `NOT VERIFIED ⚠️ (${mismatchSummary.join(", ")})`;
+
+        return {
+          ...baseRow,
+          Status: status,
+          __meta: meta,
+        };
       });
 
       setResults(checked);
@@ -242,7 +326,7 @@ export default function UploadPage() {
   // ---------- download CSV helper ----------
   const downloadCSV = () => {
     if (results.length === 0) return;
-    const headers = Object.keys(results[0]);
+    const headers = Object.keys(results[0]).filter((h) => h !== META_KEY);
     const rowsCsv = results.map((r) => headers.map((h) => JSON.stringify(r[h] ?? "")).join(","));
     const csvContent = [headers.join(","), ...rowsCsv].join("\n");
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
@@ -262,6 +346,8 @@ export default function UploadPage() {
     const pct = (n) => Math.round((n / total) * 100);
     return { total, verified, notVerified, unknown, pv: pct(verified), pnv: pct(notVerified), pu: pct(unknown) };
   })();
+
+  const tableHeaders = results.length ? Object.keys(results[0]).filter((k) => k !== META_KEY) : [];
 
   // ---------- UI ----------
   return (
@@ -359,7 +445,7 @@ export default function UploadPage() {
           <table border="1" cellPadding="6" style={{ borderCollapse: "collapse", width: "100%" }}>
             <thead>
               <tr>
-                {Object.keys(results[0]).map((k) => (
+                {tableHeaders.map((k) => (
                   <th key={k} style={{ textAlign: "left" }}>{k}</th>
                 ))}
               </tr>
@@ -373,11 +459,29 @@ export default function UploadPage() {
                     : statusText.includes("NOT VERIFIED")
                     ? "#fff8e1"
                     : "#eeeeee";
+                const rowMeta = r[META_KEY] || {};
                 return (
                   <tr key={i} style={{ background: bg }}>
-                    {Object.values(r).map((v, j) => (
-                      <td key={j}>{String(v ?? "")}</td>
-                    ))}
+                    {tableHeaders.map((header) => {
+                      const cellMeta = rowMeta[header];
+                      const isMismatch = cellMeta?.state === "mismatch";
+                      const tooltipParts = [];
+                      if (cellMeta?.reason) tooltipParts.push(cellMeta.reason);
+                      if (cellMeta?.expected) tooltipParts.push(`Expected: ${cellMeta.expected}`);
+                      const title = tooltipParts.length > 0 ? tooltipParts.join(" • ") : undefined;
+                      const cellStyle = isMismatch
+                        ? {
+                            background: "#ffebee",
+                            fontWeight: 600,
+                            border: "1px solid #ef9a9a",
+                          }
+                        : undefined;
+                      return (
+                        <td key={header} style={cellStyle} title={title}>
+                          {String(r[header] ?? "")}
+                        </td>
+                      );
+                    })}
                   </tr>
                 );
               })}
