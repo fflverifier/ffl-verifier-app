@@ -21,11 +21,38 @@ export default function UploadPage() {
     return base.replace(/^(MODEL|MOD|MDL)/, "");
   };
 
+  const normManufacturer = (s) => {
+    let base = norm(s);
+    if (!base) return "";
+    let trimmed = base;
+    const suffixes = ["LLC", "INC", "LTD", "CORP", "CORPORATION", "LLP", "PLC", "LP"];
+    let updated = true;
+    while (updated) {
+      updated = false;
+      for (const suffix of suffixes) {
+        if (trimmed.endsWith(suffix) && trimmed.length > suffix.length + 2) {
+          trimmed = trimmed.slice(0, -suffix.length);
+          updated = true;
+          break;
+        }
+      }
+    }
+    return trimmed;
+  };
+
+  const normType = (s) => {
+    const base = norm(s);
+    if (!base) return "";
+    return base.replace(/(FIREARM|FIREARMS|WEAPON|WEAPONS)/g, "");
+  };
+
   const normCaliber = (s) => {
     const base = norm(s);
     if (!base) return "";
     const trimmedLeadingZero = base.replace(/^0+([0-9])/, "$1");
-    const withoutCalTokens = trimmedLeadingZero.replace(/^(CALIBER|CAL)/, "").replace(/(CALIBER|CAL)$/, "");
+    const withoutCalTokens = trimmedLeadingZero
+      .replace(/^(CALIBER|CAL)/, "")
+      .replace(/(CALIBER|CAL)$/ , "");
     return withoutCalTokens;
   };
 
@@ -44,9 +71,9 @@ export default function UploadPage() {
   };
 
   const FIELD_COMPARATORS = {
-    manufacturer: comparatorFactory(norm),
+    manufacturer: comparatorFactory(normManufacturer, { allowContain: true }),
     model: comparatorFactory(normModel),
-    type: comparatorFactory(norm),
+    type: comparatorFactory(normType, { allowContain: true }),
     caliber: comparatorFactory(normCaliber, { allowContain: true }),
     importer: comparatorFactory(norm),
     country: comparatorFactory(norm),
@@ -55,7 +82,8 @@ export default function UploadPage() {
   // Pull the first non-empty value from possible header aliases
   const pickField = (row, names) => {
     for (const n of names) {
-      const candidates = [n, n?.toLowerCase?.(), n?.toUpperCase?.()].filter(Boolean);
+      const key = n;
+      const candidates = [key, key?.toLowerCase?.(), key?.toUpperCase?.()].filter(Boolean);
       for (const candidate of candidates) {
         const value = row[candidate];
         if (value !== undefined && value !== null && String(value).trim() !== "") {
@@ -71,11 +99,13 @@ export default function UploadPage() {
   // Accepted header aliases (canonical names listed first)
   const ALIAS = {
     upc: ["UPC", "upc", "Upc", "EAN", "ean", "Barcode", "barcode"],
+
     // ATF core fields
     manufacturer: ["Manufacturer", "manufacturer", "MFR", "mfr", "Brand", "brand", "Maker", "maker"],
     model: ["Model", "model"],
     type: ["Type", "type", "Category", "category"],
     caliber: ["Caliber", "caliber", "Cal", "cal"],
+
     // ATF optional fields
     importer: ["Importer", "importer"],
     country: ["Country of Manufacture", "Country", "country", "CountryOfManufacture"],
@@ -83,14 +113,24 @@ export default function UploadPage() {
 
   const META_KEY = "__meta";
 
-  const buildAtfKey = (obj) => {
-    const parts = [
-      norm(obj?.manufacturer || ""),
-      normModel(obj?.model || ""),
-      norm(obj?.type || ""),
-      normCaliber(obj?.caliber || ""),
-    ];
-    return parts.join("|");
+  const buildAtfKeyParts = (obj) => ({
+    manufacturer: normManufacturer(obj?.manufacturer || ""),
+    model: normModel(obj?.model || ""),
+    type: normType(obj?.type || ""),
+    caliber: normCaliber(obj?.caliber || ""),
+  });
+
+  const buildAtfKeys = (obj) => {
+    const parts = buildAtfKeyParts(obj);
+    const { manufacturer, model, type, caliber } = parts;
+    const keys = new Set();
+
+    keys.add([manufacturer, model, type, caliber].join("|"));
+    if (type) keys.add([manufacturer, model, "", caliber].join("|"));
+    if (caliber) keys.add([manufacturer, model, type, ""].join("|"));
+    keys.add([manufacturer, model, "", ""].join("|"));
+
+    return { parts, keys: Array.from(keys) };
   };
 
   // ---------- file parse ----------
@@ -101,7 +141,7 @@ export default function UploadPage() {
       header: true,
       skipEmptyLines: true,
       transformHeader: (h) => h.trim(), // avoid "UPC " vs "UPC"
-      complete: (res) => setRows(res.data),
+      complete: (res) => setRows(res.data || []),
       error: (err) => setError(err.message),
     });
   };
@@ -132,17 +172,32 @@ export default function UploadPage() {
       }
 
       // ---- 1) Fetch only UPCs we need (fast path)
-      let { data: catalogUpc, error: upcErr } = await supabase
-        .from("catalog")
-        .select("id, upc, manufacturer, model, type, caliber, importer, country")
-        .in("upc", Array.from(upcKeys));
-
-      if (upcErr) throw upcErr;
-      catalogUpc ||= [];
+      let catalogUpc = [];
+      if (upcKeys.size > 0) {
+        const { data, error: upcErr } = await supabase
+          .from("catalog")
+          .select("id, upc, manufacturer, model, type, caliber, importer, country")
+          .in("upc", Array.from(upcKeys));
+        if (upcErr) throw upcErr;
+        catalogUpc = data || [];
+      }
 
       // Build maps from UPC subset
       const upcMap = new Map(); // UPC digits -> array of catalog rows (handle duplicates)
       const matchKeyMap = new Map(); // ATF core key -> array (will be extended if we fetch full catalog)
+
+      const registeredCatalogIds = new Set();
+
+      const registerMatchKeys = (row) => {
+        const rowId = row?.id;
+        if (rowId && registeredCatalogIds.has(rowId)) return;
+        if (rowId) registeredCatalogIds.add(rowId);
+        const { keys } = buildAtfKeys(row);
+        for (const key of keys) {
+          if (!matchKeyMap.has(key)) matchKeyMap.set(key, []);
+          matchKeyMap.get(key).push(row);
+        }
+      };
 
       const previewCatalogUPCs = [];
       for (const cRow of catalogUpc) {
@@ -152,9 +207,7 @@ export default function UploadPage() {
         if (!upcMap.has(d)) upcMap.set(d, []);
         upcMap.get(d).push(cRow);
 
-        const mk = buildAtfKey(cRow);
-        if (!matchKeyMap.has(mk)) matchKeyMap.set(mk, []);
-        matchKeyMap.get(mk).push(cRow);
+        registerMatchKeys(cRow);
 
         if (previewCatalogUPCs.length < 10) {
           previewCatalogUPCs.push({ raw: cRow.upc ?? "", digits: d, strict: strip0(d) });
@@ -167,12 +220,7 @@ export default function UploadPage() {
           .from("catalog")
           .select("id, upc, manufacturer, model, type, caliber, importer, country");
         if (allErr) throw allErr;
-
-        for (const cRow of (catalogAll || [])) {
-          const mk = buildAtfKey(cRow);
-          if (!matchKeyMap.has(mk)) matchKeyMap.set(mk, []);
-          matchKeyMap.get(mk).push(cRow);
-        }
+        for (const cRow of catalogAll || []) registerMatchKeys(cRow);
       }
 
       // ---------- scoring to pick best candidate when duplicates exist ----------
@@ -193,9 +241,7 @@ export default function UploadPage() {
           if (!hasValue(actual)) continue;
           const expected = c[field];
           const comparator = FIELD_COMPARATORS[field] || comparatorFactory(norm);
-          if (comparator(actual, expected)) {
-            s += weight;
-          }
+          if (comparator(actual, expected)) s += weight;
         }
 
         return s;
@@ -205,7 +251,7 @@ export default function UploadPage() {
       const checked = rows.map((r) => {
         const upcPick = pickField(r, ALIAS.upc);
         const manufacturerPick = pickField(r, ALIAS.manufacturer);
-        const modelPick = pickField(r, ALIAS.model); // <-- fixed
+        const modelPick = pickField(r, ALIAS.model);
         const typePick = pickField(r, ALIAS.type);
         const caliberPick = pickField(r, ALIAS.caliber);
         const importerPick = pickField(r, ALIAS.importer);
@@ -220,7 +266,7 @@ export default function UploadPage() {
         const co = countryPick.value;
 
         const d = normDigits(upcRaw);
-        const mk = buildAtfKey({ manufacturer: m, model: mo, type: t, caliber: c });
+        const { keys: atfKeys } = buildAtfKeys({ manufacturer: m, model: mo, type: t, caliber: c });
 
         const baseRow = {
           ...r,
@@ -240,12 +286,17 @@ export default function UploadPage() {
         }
 
         // B) If no UPC or no UPC match, fall back to ATF fields only (core fields)
-        if ((!d || candidates.length === 0) && mk && matchKeyMap.has(mk)) {
-          candidates = matchKeyMap.get(mk);
+        if ((!d || candidates.length === 0) && atfKeys.length > 0) {
+          for (const key of atfKeys) {
+            if (matchKeyMap.has(key)) {
+              candidates = matchKeyMap.get(key);
+              if (candidates.length > 0) break;
+            }
+          }
         }
 
         if (!candidates || candidates.length === 0) {
-          return { ...baseRow, Status: "UNKNOWN ❔", __meta: {} };
+          return { ...baseRow, Status: "UNKNOWN ❔", [META_KEY]: {} };
         }
 
         // Choose the best candidate by score
@@ -253,7 +304,7 @@ export default function UploadPage() {
           .map((cRow) => ({ cRow, score: scoreCandidate(r, cRow) }))
           .sort((a, b) => b.score - a.score)[0]?.cRow;
 
-        if (!best) return { ...baseRow, Status: "UNKNOWN ❔", __meta: {} };
+        if (!best) return { ...baseRow, Status: "UNKNOWN ❔", [META_KEY]: {} };
 
         const meta = {};
         const mismatchedCanonicals = new Set();
@@ -301,7 +352,6 @@ export default function UploadPage() {
           }
         };
 
-        // Compare UPC (digits-only equality)
         if (d) {
           evaluateField({
             canonicalKey: "UPC",
@@ -311,14 +361,13 @@ export default function UploadPage() {
           });
         }
 
-        // Compare the rest
         [
           { canonicalKey: "Manufacturer", pick: manufacturerPick, expected: best.manufacturer, comparator: FIELD_COMPARATORS.manufacturer },
-          { canonicalKey: "Model",        pick: modelPick,        expected: best.model,        comparator: FIELD_COMPARATORS.model },
-          { canonicalKey: "Type",         pick: typePick,         expected: best.type,         comparator: FIELD_COMPARATORS.type },
-          { canonicalKey: "Caliber",      pick: caliberPick,      expected: best.caliber,      comparator: FIELD_COMPARATORS.caliber },
-          { canonicalKey: "Importer",     pick: importerPick,     expected: best.importer,     comparator: FIELD_COMPARATORS.importer },
-          { canonicalKey: "Country",      pick: countryPick,      expected: best.country,      comparator: FIELD_COMPARATORS.country },
+          { canonicalKey: "Model", pick: modelPick, expected: best.model, comparator: FIELD_COMPARATORS.model },
+          { canonicalKey: "Type", pick: typePick, expected: best.type, comparator: FIELD_COMPARATORS.type },
+          { canonicalKey: "Caliber", pick: caliberPick, expected: best.caliber, comparator: FIELD_COMPARATORS.caliber },
+          { canonicalKey: "Importer", pick: importerPick, expected: best.importer, comparator: FIELD_COMPARATORS.importer },
+          { canonicalKey: "Country", pick: countryPick, expected: best.country, comparator: FIELD_COMPARATORS.country },
         ].forEach((config) => evaluateField(config));
 
         const mismatchSummary = Array.from(mismatchedCanonicals);
@@ -337,13 +386,11 @@ export default function UploadPage() {
       setResults(checked);
 
       // ---------- debug info ----------
-      const unknownWithUPC = checked.filter(
-        (r) => String(r.Status).includes("UNKNOWN") && normDigits(firstVal(r, ALIAS.upc)) !== ""
-      );
+      const unknownWithUPC = checked.filter((r) => String(r.Status).includes("UNKNOWN") && normDigits(r.UPC) !== "");
 
       let duplicateHitCount = 0;
       for (const k of upcMap.keys()) {
-        if (upcMap.get(k)?.length > 1) duplicateHitCount++;
+        if ((upcMap.get(k) || []).length > 1) duplicateHitCount++;
       }
 
       setDebugInfo({
@@ -511,7 +558,11 @@ export default function UploadPage() {
                       if (cellMeta?.expected) tooltipParts.push(`Expected: ${cellMeta.expected}`);
                       const title = tooltipParts.length > 0 ? tooltipParts.join(" • ") : undefined;
                       const cellStyle = isMismatch
-                        ? { background: "#ffebee", fontWeight: 600, border: "1px solid #ef9a9a" }
+                        ? {
+                            background: "#ffebee",
+                            fontWeight: 600,
+                            border: "1px solid #ef9a9a",
+                          }
                         : undefined;
                       return (
                         <td key={header} style={cellStyle} title={title}>
@@ -530,15 +581,9 @@ export default function UploadPage() {
             <details style={{ marginTop: 20 }}>
               <summary style={{ cursor: "pointer", fontWeight: 600 }}>Debug</summary>
               <div style={{ fontFamily: "monospace", fontSize: 12, marginTop: 10 }}>
-                <div>
-                  Unknown rows with a UPC: <strong>{debugInfo.unknownUPCCount}</strong>
-                </div>
-                <div>
-                  Catalog UPC keys with duplicates: <strong>{debugInfo.duplicateCatalogUpcKeys}</strong>
-                </div>
-                <div>
-                  Rows verified by ATF-only (no UPC): <strong>{debugInfo.atfOnlyRows}</strong>
-                </div>
+                <div>Unknown rows with a UPC: <strong>{debugInfo.unknownUPCCount}</strong></div>
+                <div>Catalog UPC keys with duplicates: <strong>{debugInfo.duplicateCatalogUpcKeys}</strong></div>
+                <div>Rows verified by ATF-only (no UPC): <strong>{debugInfo.atfOnlyRows}</strong></div>
                 <div style={{ marginTop: 8 }}>
                   <div>Uploaded UPCs (first 10):</div>
                   <pre>{JSON.stringify(debugInfo.uploadPreview, null, 2)}</pre>
