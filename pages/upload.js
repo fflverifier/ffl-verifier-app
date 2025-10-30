@@ -52,7 +52,7 @@ export default function UploadPage() {
     const trimmedLeadingZero = base.replace(/^0+([0-9])/, "$1");
     const withoutCalTokens = trimmedLeadingZero
       .replace(/^(CALIBER|CAL)/, "")
-      .replace(/(CALIBER|CAL)$/ , "");
+      .replace(/(CALIBER|CAL)$/, "");
     return withoutCalTokens;
   };
 
@@ -71,8 +71,8 @@ export default function UploadPage() {
   };
 
   const FIELD_COMPARATORS = {
-    manufacturer: comparatorFactory(normManufacturer, { allowContain: true }),
-    model: comparatorFactory(normModel),
+    manufacturer: comparatorFactory(normManufacturer),
+    model: comparatorFactory(normModel, { allowContain: true }),
     type: comparatorFactory(normType, { allowContain: true }),
     caliber: comparatorFactory(normCaliber, { allowContain: true }),
     importer: comparatorFactory(norm),
@@ -113,26 +113,6 @@ export default function UploadPage() {
 
   const META_KEY = "__meta";
 
-  const buildAtfKeyParts = (obj) => ({
-    manufacturer: normManufacturer(obj?.manufacturer || ""),
-    model: normModel(obj?.model || ""),
-    type: normType(obj?.type || ""),
-    caliber: normCaliber(obj?.caliber || ""),
-  });
-
-  const buildAtfKeys = (obj) => {
-    const parts = buildAtfKeyParts(obj);
-    const { manufacturer, model, type, caliber } = parts;
-    const keys = new Set();
-
-    keys.add([manufacturer, model, type, caliber].join("|"));
-    if (type) keys.add([manufacturer, model, "", caliber].join("|"));
-    if (caliber) keys.add([manufacturer, model, type, ""].join("|"));
-    keys.add([manufacturer, model, "", ""].join("|"));
-
-    return { parts, keys: Array.from(keys) };
-  };
-
   // ---------- file parse ----------
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -155,8 +135,8 @@ export default function UploadPage() {
     try {
       // Collect UPCs to fetch; detect if any rows lack UPC (to enable ATF-only path)
       const upcKeys = new Set();
-      let needAtfOnly = false;
       const previewUploadUPCs = [];
+      const atfManufacturerSet = new Set();
 
       for (const r of rows) {
         const raw = firstVal(r, ALIAS.upc);
@@ -167,37 +147,28 @@ export default function UploadPage() {
             previewUploadUPCs.push({ raw, digits: d, strict: strip0(d) });
           }
         } else {
-          needAtfOnly = true;
+          const manufacturerRaw = firstVal(r, ALIAS.manufacturer);
+          if (manufacturerRaw && String(manufacturerRaw).trim() !== "") {
+            atfManufacturerSet.add(manufacturerRaw);
+          }
         }
       }
 
       // ---- 1) Fetch only UPCs we need (fast path)
+      const selectColumns = "id, upc, manufacturer, model, type, caliber, importer, country";
       let catalogUpc = [];
       if (upcKeys.size > 0) {
         const { data, error: upcErr } = await supabase
           .from("catalog")
-          .select("id, upc, manufacturer, model, type, caliber, importer, country")
-          .in("upc", Array.from(upcKeys));
+          .select(selectColumns)
+          .in("upc", Array.from(upcKeys))
+          .limit(10000);
         if (upcErr) throw upcErr;
         catalogUpc = data || [];
       }
 
       // Build maps from UPC subset
       const upcMap = new Map(); // UPC digits -> array of catalog rows (handle duplicates)
-      const matchKeyMap = new Map(); // ATF core key -> array (will be extended if we fetch full catalog)
-
-      const registeredCatalogIds = new Set();
-
-      const registerMatchKeys = (row) => {
-        const rowId = row?.id;
-        if (rowId && registeredCatalogIds.has(rowId)) return;
-        if (rowId) registeredCatalogIds.add(rowId);
-        const { keys } = buildAtfKeys(row);
-        for (const key of keys) {
-          if (!matchKeyMap.has(key)) matchKeyMap.set(key, []);
-          matchKeyMap.get(key).push(row);
-        }
-      };
 
       const previewCatalogUPCs = [];
       for (const cRow of catalogUpc) {
@@ -207,45 +178,28 @@ export default function UploadPage() {
         if (!upcMap.has(d)) upcMap.set(d, []);
         upcMap.get(d).push(cRow);
 
-        registerMatchKeys(cRow);
-
         if (previewCatalogUPCs.length < 10) {
           previewCatalogUPCs.push({ raw: cRow.upc ?? "", digits: d, strict: strip0(d) });
         }
       }
 
-      // ---- 2) If any upload rows *lack UPC*, fetch minimal full catalog once to support ATF-only fallback
-      if (needAtfOnly) {
-        const { data: catalogAll, error: allErr } = await supabase
+      const atfCandidateMap = new Map();
+      if (atfManufacturerSet.size > 0) {
+        const { data: atfData, error: atfErr } = await supabase
           .from("catalog")
-          .select("id, upc, manufacturer, model, type, caliber, importer, country");
-        if (allErr) throw allErr;
-        for (const cRow of catalogAll || []) registerMatchKeys(cRow);
+          .select(selectColumns)
+          .in("manufacturer", Array.from(atfManufacturerSet))
+          .limit(10000);
+        if (atfErr) throw atfErr;
+        for (const row of atfData || []) {
+          const key = `${normManufacturer(row?.manufacturer)}::${normModel(row?.model)}`;
+          if (!atfCandidateMap.has(key)) atfCandidateMap.set(key, []);
+          atfCandidateMap.get(key).push(row);
+        }
       }
 
       // ---------- scoring to pick best candidate when duplicates exist ----------
-      const scoreCandidate = (uploadRow, c) => {
-        let s = 0;
-
-        const candidateComparisons = [
-          { field: "manufacturer", aliases: ALIAS.manufacturer, weight: 3 },
-          { field: "model", aliases: ALIAS.model, weight: 3 },
-          { field: "type", aliases: ALIAS.type, weight: 2 },
-          { field: "caliber", aliases: ALIAS.caliber, weight: 2 },
-          { field: "importer", aliases: ALIAS.importer, weight: 1 },
-          { field: "country", aliases: ALIAS.country, weight: 1 },
-        ];
-
-        for (const { field, aliases, weight } of candidateComparisons) {
-          const actual = firstVal(uploadRow, aliases);
-          if (!hasValue(actual)) continue;
-          const expected = c[field];
-          const comparator = FIELD_COMPARATORS[field] || comparatorFactory(norm);
-          if (comparator(actual, expected)) s += weight;
-        }
-
-        return s;
-      };
+      const normalizeCell = (val) => (val === undefined || val === null ? "" : String(val).trim());
 
       // ---------- verify each upload row ----------
       const checked = rows.map((r) => {
@@ -266,7 +220,6 @@ export default function UploadPage() {
         const co = countryPick.value;
 
         const d = normDigits(upcRaw);
-        const { keys: atfKeys } = buildAtfKeys({ manufacturer: m, model: mo, type: t, caliber: c });
 
         const baseRow = {
           ...r,
@@ -279,49 +232,59 @@ export default function UploadPage() {
           Country: co,
         };
 
-        // A) UPC-first if provided
-        let candidates = [];
-        if (d && upcMap.has(d)) {
-          candidates = upcMap.get(d);
-        }
+        const normalizedCore = {
+          manufacturer: normManufacturer(m),
+          model: normModel(mo),
+          type: normType(t),
+          caliber: normCaliber(c),
+        };
 
-        // B) If no UPC or no UPC match, fall back to ATF fields only (core fields)
-        if ((!d || candidates.length === 0) && atfKeys.length > 0) {
-          for (const key of atfKeys) {
-            if (matchKeyMap.has(key)) {
-              candidates = matchKeyMap.get(key);
-              if (candidates.length > 0) break;
-            }
-          }
+        const toCanonical = {
+          manufacturer: "Manufacturer",
+          model: "Model",
+          type: "Type",
+          caliber: "Caliber",
+        };
+
+        const collectMeta = (meta, canonicalKey, pick, expectedValue, reason) => {
+          const actualStr = pick.value === undefined || pick.value === null ? "" : String(pick.value).trim();
+          const expectedStr = expectedValue === undefined || expectedValue === null ? "" : String(expectedValue).trim();
+          meta[canonicalKey] = {
+            state: "mismatch",
+            expected: expectedStr,
+            actual: actualStr,
+            reason: reason || "Mismatch",
+          };
+        };
+
+        let candidates = [];
+        if (d) {
+          candidates = upcMap.get(d) || [];
+        } else {
+          const comboKey = `${normalizedCore.manufacturer}::${normalizedCore.model}`;
+          candidates = atfCandidateMap.get(comboKey) || [];
         }
 
         if (!candidates || candidates.length === 0) {
-          return { ...baseRow, Status: "UNKNOWN ❔", [META_KEY]: {} };
+          const meta = {};
+          collectMeta(meta, "Manufacturer", manufacturerPick, "", "No catalog record with this manufacturer/model");
+          collectMeta(meta, "Model", modelPick, "", "No catalog record with this manufacturer/model");
+          return {
+            ...baseRow,
+            Status: "NOT VERIFIED ⚠️ (Manufacturer, Model)",
+            [META_KEY]: meta,
+          };
         }
 
-        // Choose the best candidate by score
-        const best = candidates
-          .map((cRow) => ({ cRow, score: scoreCandidate(r, cRow) }))
-          .sort((a, b) => b.score - a.score)[0]?.cRow;
-
-        if (!best) return { ...baseRow, Status: "UNKNOWN ❔", [META_KEY]: {} };
-
-        const meta = {};
-        const mismatchedCanonicals = new Set();
-        const toStr = (val) => (val === undefined || val === null ? "" : String(val));
-
-        const evaluateField = ({ canonicalKey, pick, expected, comparator }) => {
-          const actualStr = toStr(pick.value).trim();
-          const expectedStr = toStr(expected).trim();
+        const compareField = (actual, expected, comparator) => {
+          const actualStr = normalizeCell(actual);
+          const expectedStr = normalizeCell(expected);
           const hasActual = actualStr !== "";
           const hasExpected = expectedStr !== "";
-
           let match = true;
           let reason = "";
 
-          if (!hasActual && !hasExpected) {
-            match = true;
-          } else if (!hasActual && hasExpected) {
+          if (!hasActual && hasExpected) {
             match = false;
             reason = "Missing value";
           } else if (hasActual && hasExpected) {
@@ -330,51 +293,142 @@ export default function UploadPage() {
             if (!match) {
               reason = `Expected "${expectedStr}"`;
             }
-          } else if (hasActual && !hasExpected) {
-            match = true; // Nothing reliable to compare against
           }
 
-          if (!match) {
-            const keysToMark = new Set();
-            if (canonicalKey) keysToMark.add(canonicalKey);
-            if (pick.key && pick.key !== canonicalKey) keysToMark.add(pick.key);
-            if (keysToMark.size === 0) keysToMark.add(canonicalKey || pick.key || "Field");
-
-            mismatchedCanonicals.add(canonicalKey || pick.key || "Field");
-            keysToMark.forEach((key) => {
-              meta[key] = {
-                state: "mismatch",
-                expected: expectedStr,
-                actual: actualStr,
-                reason: reason || "Mismatch",
-              };
-            });
-          }
+          return { match, reason, actualStr, expectedStr };
         };
 
-        if (d) {
-          evaluateField({
-            canonicalKey: "UPC",
-            pick: upcPick,
-            expected: best.upc,
-            comparator: (a, b) => normDigits(a) === normDigits(b),
-          });
+        const matchesCore = (row) =>
+          normalizedCore.manufacturer === normManufacturer(row?.manufacturer) &&
+          normalizedCore.model === normModel(row?.model) &&
+          normalizedCore.type === normType(row?.type) &&
+          normalizedCore.caliber === normCaliber(row?.caliber);
+
+        if (normalizedCore.manufacturer.includes("PALMETTO") && normalizedCore.model.includes("PA15")) {
+          console.log(
+            "Palmetto candidates",
+            candidates.map((row) => ({
+              manufacturer: row?.manufacturer,
+              model: row?.model,
+              type: row?.type,
+              caliber: row?.caliber,
+              upc: row?.upc,
+            }))
+          );
+          console.log(
+            "Palmetto exact core matches",
+            candidates.filter(matchesCore).map((row) => ({
+              manufacturer: row?.manufacturer,
+              model: row?.model,
+              type: row?.type,
+              caliber: row?.caliber,
+              upc: row?.upc,
+            }))
+          );
         }
 
-        [
-          { canonicalKey: "Manufacturer", pick: manufacturerPick, expected: best.manufacturer, comparator: FIELD_COMPARATORS.manufacturer },
-          { canonicalKey: "Model", pick: modelPick, expected: best.model, comparator: FIELD_COMPARATORS.model },
-          { canonicalKey: "Type", pick: typePick, expected: best.type, comparator: FIELD_COMPARATORS.type },
-          { canonicalKey: "Caliber", pick: caliberPick, expected: best.caliber, comparator: FIELD_COMPARATORS.caliber },
-          { canonicalKey: "Importer", pick: importerPick, expected: best.importer, comparator: FIELD_COMPARATORS.importer },
-          { canonicalKey: "Country", pick: countryPick, expected: best.country, comparator: FIELD_COMPARATORS.country },
-        ].forEach((config) => evaluateField(config));
+        const coreFields = [
+          { key: "manufacturer", pick: manufacturerPick, comparator: FIELD_COMPARATORS.manufacturer },
+          { key: "model", pick: modelPick, comparator: FIELD_COMPARATORS.model },
+          { key: "type", pick: typePick, comparator: FIELD_COMPARATORS.type },
+          { key: "caliber", pick: caliberPick, comparator: FIELD_COMPARATORS.caliber },
+        ];
 
-        const mismatchSummary = Array.from(mismatchedCanonicals);
+        if (d) {
+          const upcCandidates = candidates;
+          if (!upcCandidates || upcCandidates.length === 0) {
+            const meta = {};
+            collectMeta(meta, "UPC", upcPick, "", "No catalog record with this UPC");
+            return {
+              ...baseRow,
+              Status: "NOT VERIFIED ⚠️ (UPC)",
+              [META_KEY]: meta,
+            };
+          }
+
+          const exactMatch = upcCandidates.find(matchesCore);
+          const best = exactMatch ?? upcCandidates[0];
+          const meta = {};
+          const mismatchedCanonicals = [];
+
+          coreFields.forEach(({ key, pick, comparator }) => {
+            const { match } = compareField(pick.value, best?.[key], comparator);
+            if (!match) {
+              const label = toCanonical[key];
+              mismatchedCanonicals.push(label);
+              collectMeta(meta, label, pick, best?.[key], "Catalog value differs");
+            }
+          });
+
+          const status =
+            mismatchedCanonicals.length === 0
+              ? "VERIFIED ✅ (UPC & ATF match)"
+              : `NOT VERIFIED ⚠️ (${mismatchedCanonicals.join(", ")})`;
+
+          return {
+            ...baseRow,
+            Status: status,
+            [META_KEY]: meta,
+          };
+        }
+
+        // ATF-only validation (no UPC)
+        const exactMatches = candidates.filter(matchesCore);
+
+        if (exactMatches.length === 1) {
+          return {
+            ...baseRow,
+            Status: "VERIFIED ✅ (ATF match)",
+            [META_KEY]: {},
+          };
+        }
+
+        if (exactMatches.length > 1) {
+          return {
+            ...baseRow,
+            Status: "NOT VERIFIED ⚠️ (Ambiguous ATF match)",
+            [META_KEY]: {},
+          };
+        }
+
+        const annotateFields = (fieldsToFlag, referenceRow, reason) => {
+          const meta = {};
+          fieldsToFlag.forEach((fieldKey) => {
+            const label = toCanonical[fieldKey];
+            const pick =
+              fieldKey === "manufacturer"
+                ? manufacturerPick
+                : fieldKey === "model"
+                ? modelPick
+                : fieldKey === "type"
+                ? typePick
+                : caliberPick;
+            collectMeta(meta, label, pick, referenceRow?.[fieldKey], reason);
+          });
+          return meta;
+        };
+
+        const bestPartial = candidates
+          .map((row) => {
+            const matchingKeys = coreFields
+              .filter(({ key, pick, comparator }) => compareField(pick.value, row?.[key], comparator).match)
+              .map(({ key }) => key);
+            return { row, matchingKeys };
+          })
+          .sort((a, b) => b.matchingKeys.length - a.matchingKeys.length)[0];
+
+        const matchedCount = bestPartial?.matchingKeys.length ?? 0;
+        const unmatchedFields = coreFields
+          .map(({ key }) => key)
+          .filter((key) => !(bestPartial?.matchingKeys || []).includes(key));
+
+        const mismatchLabels = unmatchedFields.map((key) => toCanonical[key]);
+        const meta = annotateFields(unmatchedFields, bestPartial?.row, matchedCount > 0 ? "Closest catalog match differs" : "No catalog match");
+
         const status =
-          mismatchSummary.length === 0
-            ? (d ? "VERIFIED ✅ (UPC & ATF match)" : "VERIFIED ✅ (ATF match)")
-            : `NOT VERIFIED ⚠️ (${mismatchSummary.join(", ")})`;
+          mismatchLabels.length > 0
+            ? `NOT VERIFIED ⚠️ (${mismatchLabels.join(", ")})`
+            : "NOT VERIFIED ⚠️ (No matching catalog record)";
 
         return {
           ...baseRow,
