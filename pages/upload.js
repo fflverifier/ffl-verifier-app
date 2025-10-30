@@ -9,6 +9,7 @@ export default function UploadPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [debugInfo, setDebugInfo] = useState(null);
+  const [activeStatusFilters, setActiveStatusFilters] = useState(["VERIFIED", "NOT VERIFIED", "UNKNOWN"]);
 
   // ---------- helpers ----------
   const norm = (s) => (s || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -489,6 +490,28 @@ export default function UploadPage() {
     return { total, verified, notVerified, unknown, pv: pct(verified), pnv: pct(notVerified), pu: pct(unknown) };
   })();
 
+  const statusKeyForRow = (status) => {
+    const text = String(status || "");
+    if (text.includes("NOT VERIFIED")) return "NOT VERIFIED";
+    if (text.includes("VERIFIED ✅")) return "VERIFIED";
+    return "UNKNOWN";
+  };
+
+  const toggleStatusFilter = (key) => {
+    setActiveStatusFilters((prev) => {
+      const isActive = prev.includes(key);
+      if (isActive) {
+        if (prev.length === 1) return prev;
+        return prev.filter((item) => item !== key);
+      }
+      return [...prev, key];
+    });
+  };
+
+  const resetStatusFilters = () => setActiveStatusFilters(["VERIFIED", "NOT VERIFIED", "UNKNOWN"]);
+
+  const filteredResults = results.filter((row) => activeStatusFilters.includes(statusKeyForRow(row.Status)));
+
   const tableHeaders = results.length ? Object.keys(results[0]).filter((k) => k !== META_KEY) : [];
 
   // ---------- UI ----------
@@ -509,31 +532,80 @@ export default function UploadPage() {
 
       {results.length > 0 && (
         <div style={{ marginTop: 20 }}>
-          <h3>Results ({results.length} rows)</h3>
+          <h3>Results ({filteredResults.length} of {results.length} rows)</h3>
 
           {/* Summary bar */}
           <div
             style={{
               display: "flex",
-              gap: 16,
+              alignItems: "center",
+              gap: 12,
               flexWrap: "wrap",
-              margin: "8px 0 14px 0",
+              margin: "8px 0 6px 0",
               fontSize: 14,
             }}
           >
-            <span style={{ padding: "6px 10px", background: "#e8f5e9", border: "1px solid #c8e6c9", borderRadius: 6 }}>
-              VERIFIED: <strong>{stats.verified}</strong> ({stats.pv}%)
-            </span>
-            <span style={{ padding: "6px 10px", background: "#fff8e1", border: "1px solid #ffe082", borderRadius: 6 }}>
-              NOT VERIFIED: <strong>{stats.notVerified}</strong> ({stats.pnv}%)
-            </span>
-            <span style={{ padding: "6px 10px", background: "#eeeeee", border: "1px solid #cccccc", borderRadius: 6 }}>
-              UNKNOWN: <strong>{stats.unknown}</strong> ({stats.pu}%)
-            </span>
+            {[
+              {
+                key: "VERIFIED",
+                label: `VERIFIED: ${stats.verified} (${stats.pv}%)`,
+                baseStyle: { background: "#e8f5e9", border: "1px solid #c8e6c9" },
+              },
+              {
+                key: "NOT VERIFIED",
+                label: `NOT VERIFIED: ${stats.notVerified} (${stats.pnv}%)`,
+                baseStyle: { background: "#fff8e1", border: "1px solid #ffe082" },
+              },
+              {
+                key: "UNKNOWN",
+                label: `UNKNOWN: ${stats.unknown} (${stats.pu}%)`,
+                baseStyle: { background: "#eeeeee", border: "1px solid #cccccc" },
+              },
+            ].map(({ key, label, baseStyle }) => {
+              const isActive = activeStatusFilters.includes(key);
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => toggleStatusFilter(key)}
+                  aria-pressed={isActive}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    fontSize: 14,
+                    fontWeight: isActive ? 600 : 400,
+                    opacity: isActive ? 1 : 0.45,
+                    transition: "opacity 0.15s ease",
+                    background: baseStyle.background,
+                    border: baseStyle.border,
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
             <span style={{ padding: "6px 10px", border: "1px dashed #bbb", borderRadius: 6 }}>
               TOTAL: <strong>{stats.total}</strong>
             </span>
+            <button
+              type="button"
+              onClick={resetStatusFilters}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 6,
+                border: "1px solid #b0bec5",
+                background: "#f5f5f5",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              Show all
+            </button>
           </div>
+          <p style={{ fontSize: 12, margin: "0 0 12px 2px", color: "#555" }}>
+            Tip: click a status chip to filter the table below.
+          </p>
 
           {/* Legend */}
           <div style={{ marginTop: 6, marginBottom: 10, display: "flex", gap: 16, fontSize: 14 }}>
@@ -593,7 +665,7 @@ export default function UploadPage() {
               </tr>
             </thead>
             <tbody>
-              {results.map((r, i) => {
+              {filteredResults.map((r, i) => {
                 const statusText = String(r.Status || "");
                 const bg =
                   statusText.includes("VERIFIED")
@@ -627,6 +699,13 @@ export default function UploadPage() {
                   </tr>
                 );
               })}
+              {filteredResults.length === 0 && (
+                <tr>
+                  <td colSpan={tableHeaders.length} style={{ padding: 12, textAlign: "center", fontStyle: "italic", color: "#666" }}>
+                    No rows match the selected filters.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
 
