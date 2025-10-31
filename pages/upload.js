@@ -137,7 +137,6 @@ export default function UploadPage() {
       // Collect UPCs to fetch; detect if any rows lack UPC (to enable ATF-only path)
       const upcKeys = new Set();
       const previewUploadUPCs = [];
-      const atfManufacturerSet = new Set();
 
       for (const r of rows) {
         const raw = firstVal(r, ALIAS.upc);
@@ -146,11 +145,6 @@ export default function UploadPage() {
           upcKeys.add(d);
           if (previewUploadUPCs.length < 10) {
             previewUploadUPCs.push({ raw, digits: d, strict: strip0(d) });
-          }
-        } else {
-          const manufacturerRaw = firstVal(r, ALIAS.manufacturer);
-          if (manufacturerRaw && String(manufacturerRaw).trim() !== "") {
-            atfManufacturerSet.add(manufacturerRaw);
           }
         }
       }
@@ -185,18 +179,32 @@ export default function UploadPage() {
       }
 
       const atfCandidateMap = new Map();
-      if (atfManufacturerSet.size > 0) {
-        const { data: atfData, error: atfErr } = await supabase
+      const atfManufacturerModelMap = new Map();
+      const pageSize = 1000;
+      let from = 0;
+      while (true) {
+        const { data: pageData, error: pageErr } = await supabase
           .from("catalog")
           .select(selectColumns)
-          .in("manufacturer", Array.from(atfManufacturerSet))
-          .limit(10000);
-        if (atfErr) throw atfErr;
-        for (const row of atfData || []) {
-          const key = `${normManufacturer(row?.manufacturer)}::${normModel(row?.model)}`;
+          .range(from, from + pageSize - 1);
+        if (pageErr) throw pageErr;
+        if (!pageData || pageData.length === 0) break;
+        for (const row of pageData) {
+          const normalizedManufacturer = normManufacturer(row?.manufacturer);
+          const normalizedModel = normModel(row?.model);
+          const normalizedType = normType(row?.type);
+          const normalizedCaliber = normCaliber(row?.caliber);
+          if (!normalizedManufacturer || !normalizedModel || !normalizedType || !normalizedCaliber) continue;
+          const key = `${normalizedManufacturer}::${normalizedModel}::${normalizedType}::${normalizedCaliber}`;
           if (!atfCandidateMap.has(key)) atfCandidateMap.set(key, []);
           atfCandidateMap.get(key).push(row);
+
+          const manufacturerModelKey = `${normalizedManufacturer}::${normalizedModel}`;
+          if (!atfManufacturerModelMap.has(manufacturerModelKey)) atfManufacturerModelMap.set(manufacturerModelKey, []);
+          atfManufacturerModelMap.get(manufacturerModelKey).push(row);
         }
+        if (pageData.length < pageSize) break;
+        from += pageSize;
       }
 
       // ---------- scoring to pick best candidate when duplicates exist ----------
@@ -223,7 +231,6 @@ export default function UploadPage() {
         const d = normDigits(upcRaw);
 
         const baseRow = {
-          ...r,
           UPC: upcRaw,
           Manufacturer: m,
           Model: mo,
@@ -232,6 +239,22 @@ export default function UploadPage() {
           Importer: im,
           Country: co,
         };
+
+        Object.entries(r).forEach(([key, value]) => {
+          const lower = key.toLowerCase();
+          if (![
+            "upc",
+            "manufacturer",
+            "model",
+            "type",
+            "caliber",
+            "importer",
+            "country",
+            "status",
+          ].includes(lower)) {
+            baseRow[key] = value;
+          }
+        });
 
         const normalizedCore = {
           manufacturer: normManufacturer(m),
@@ -258,23 +281,24 @@ export default function UploadPage() {
           };
         };
 
-        let candidates = [];
-        if (d) {
-          candidates = upcMap.get(d) || [];
-        } else {
-          const comboKey = `${normalizedCore.manufacturer}::${normalizedCore.model}`;
-          candidates = atfCandidateMap.get(comboKey) || [];
-        }
+        const comboKey = `${normalizedCore.manufacturer}::${normalizedCore.model}::${normalizedCore.type}::${normalizedCore.caliber}`;
+        const coreCandidates = atfCandidateMap.get(comboKey) || [];
 
-        if (!candidates || candidates.length === 0) {
-          const meta = {};
-          collectMeta(meta, "Manufacturer", manufacturerPick, "", "No catalog record with this manufacturer/model");
-          collectMeta(meta, "Model", modelPick, "", "No catalog record with this manufacturer/model");
-          return {
-            ...baseRow,
-            Status: "NOT VERIFIED ⚠️ (Manufacturer, Model)",
-            [META_KEY]: meta,
-          };
+        let candidates = [];
+        let candidateSource = "none";
+
+        if (d) {
+          const upcCandidates = upcMap.get(d) || [];
+          if (upcCandidates.length > 0) {
+            candidates = upcCandidates;
+            candidateSource = "upc";
+          } else if (coreCandidates.length > 0) {
+            candidates = coreCandidates;
+            candidateSource = "atf";
+          }
+        } else if (coreCandidates.length > 0) {
+          candidates = coreCandidates;
+          candidateSource = "atf";
         }
 
         const compareField = (actual, expected, comparator) => {
@@ -299,34 +323,68 @@ export default function UploadPage() {
           return { match, reason, actualStr, expectedStr };
         };
 
+        if (!candidates || candidates.length === 0) {
+          const fallbackKey = `${normalizedCore.manufacturer}::${normalizedCore.model}`;
+          const fallbackCandidates = atfManufacturerModelMap.get(fallbackKey) || [];
+          if (fallbackCandidates.length > 0) {
+            const meta = {};
+            const mismatchedCanonicals = [];
+            const compareCoreFields = [
+              { key: "manufacturer", pick: manufacturerPick, comparator: FIELD_COMPARATORS.manufacturer },
+              { key: "model", pick: modelPick, comparator: FIELD_COMPARATORS.model },
+              { key: "type", pick: typePick, comparator: FIELD_COMPARATORS.type },
+              { key: "caliber", pick: caliberPick, comparator: FIELD_COMPARATORS.caliber },
+            ];
+
+            compareCoreFields.forEach(({ key, pick, comparator }) => {
+              const hasMatch = fallbackCandidates.some((candidateRow) => compareField(pick.value, candidateRow?.[key], comparator).match);
+              if (!hasMatch) {
+                mismatchedCanonicals.push(toCanonical[key]);
+                const expectedValue = fallbackCandidates[0]?.[key];
+                collectMeta(meta, toCanonical[key], pick, expectedValue, "Catalog value differs");
+              }
+            });
+
+            const status =
+              mismatchedCanonicals.length === 0
+                ? "VERIFIED ✅ (ATF match)"
+                : `NOT VERIFIED ⚠️ (${mismatchedCanonicals.join(", ")})`;
+
+            return {
+              ...baseRow,
+              Status: status,
+              [META_KEY]: meta,
+            };
+          }
+
+          console.log("ATF lookup miss", {
+            upload: {
+              manufacturer: m,
+              model: mo,
+              type: t,
+              caliber: c,
+              normalized: `${normalizedCore.manufacturer}::${normalizedCore.model}::${normalizedCore.type}::${normalizedCore.caliber}`,
+            },
+            candidateCount: candidates.length,
+          });
+          const meta = {};
+          const missReason = "No catalog record matched these normalized fields";
+          collectMeta(meta, "Manufacturer", manufacturerPick, "", missReason);
+          collectMeta(meta, "Model", modelPick, "", missReason);
+          collectMeta(meta, "Type", typePick, "", missReason);
+          collectMeta(meta, "Caliber", caliberPick, "", missReason);
+          return {
+            ...baseRow,
+            Status: "UNKNOWN ⚠️ (No catalog match)",
+            [META_KEY]: meta,
+          };
+        }
+
         const matchesCore = (row) =>
           normalizedCore.manufacturer === normManufacturer(row?.manufacturer) &&
           normalizedCore.model === normModel(row?.model) &&
           normalizedCore.type === normType(row?.type) &&
           normalizedCore.caliber === normCaliber(row?.caliber);
-
-        if (normalizedCore.manufacturer.includes("PALMETTO") && normalizedCore.model.includes("PA15")) {
-          console.log(
-            "Palmetto candidates",
-            candidates.map((row) => ({
-              manufacturer: row?.manufacturer,
-              model: row?.model,
-              type: row?.type,
-              caliber: row?.caliber,
-              upc: row?.upc,
-            }))
-          );
-          console.log(
-            "Palmetto exact core matches",
-            candidates.filter(matchesCore).map((row) => ({
-              manufacturer: row?.manufacturer,
-              model: row?.model,
-              type: row?.type,
-              caliber: row?.caliber,
-              upc: row?.upc,
-            }))
-          );
-        }
 
         const coreFields = [
           { key: "manufacturer", pick: manufacturerPick, comparator: FIELD_COMPARATORS.manufacturer },
@@ -335,7 +393,10 @@ export default function UploadPage() {
           { key: "caliber", pick: caliberPick, comparator: FIELD_COMPARATORS.caliber },
         ];
 
-        if (d) {
+        const usingUPCMatch = d && candidateSource === "upc";
+        const upcMissingButAtfFallback = d && candidateSource === "atf";
+
+        if (usingUPCMatch) {
           const upcCandidates = candidates;
           if (!upcCandidates || upcCandidates.length === 0) {
             const meta = {};
@@ -373,21 +434,28 @@ export default function UploadPage() {
           };
         }
 
-        // ATF-only validation (no UPC)
+        // ATF-only validation (no UPC match, or UPC not found but ATF fields match)
         const exactMatches = candidates.filter(matchesCore);
 
-        if (exactMatches.length === 1) {
+        if (exactMatches.length >= 1) {
+          if (upcMissingButAtfFallback) {
+            const meta = {};
+            collectMeta(
+              meta,
+              "UPC",
+              upcPick,
+              "",
+              "UPC not found in catalog; verified via ATF fields"
+            );
+            return {
+              ...baseRow,
+              Status: "NOT VERIFIED ⚠️ (UPC; ATF match)",
+              [META_KEY]: meta,
+            };
+          }
           return {
             ...baseRow,
             Status: "VERIFIED ✅ (ATF match)",
-            [META_KEY]: {},
-          };
-        }
-
-        if (exactMatches.length > 1) {
-          return {
-            ...baseRow,
-            Status: "NOT VERIFIED ⚠️ (Ambiguous ATF match)",
             [META_KEY]: {},
           };
         }
@@ -429,7 +497,7 @@ export default function UploadPage() {
         const status =
           mismatchLabels.length > 0
             ? `NOT VERIFIED ⚠️ (${mismatchLabels.join(", ")})`
-            : "NOT VERIFIED ⚠️ (No matching catalog record)";
+            : "NOT VERIFIED ⚠️ (Manufacturer, Model, Type, Caliber)";
 
         return {
           ...baseRow,
@@ -512,7 +580,22 @@ export default function UploadPage() {
 
   const filteredResults = results.filter((row) => activeStatusFilters.includes(statusKeyForRow(row.Status)));
 
-  const tableHeaders = results.length ? Object.keys(results[0]).filter((k) => k !== META_KEY) : [];
+  const canonicalHeaders = ["Status", "Manufacturer", "Model", "Type", "Caliber", "UPC", "Importer", "Country"];
+
+  const dynamicKeys = results.length ? Object.keys(results[0]).filter((k) => k !== META_KEY) : [];
+
+  const canonicalInDataset = canonicalHeaders
+    .map((header) => {
+      const match = dynamicKeys.find((key) => key.toLowerCase() === header.toLowerCase());
+      return match || null;
+    })
+    .filter(Boolean);
+
+  const extraHeaders = dynamicKeys.filter(
+    (key) => !canonicalHeaders.some((header) => header.toLowerCase() === key.toLowerCase())
+  );
+
+  const tableHeaders = [...canonicalInDataset, ...extraHeaders];
 
   // ---------- UI ----------
   return (
@@ -670,6 +753,8 @@ export default function UploadPage() {
                 const bg =
                   statusText.includes("VERIFIED")
                     ? "#e8f5e9"
+                    : statusText.includes("NOT VERIFIED") && statusText.includes("UPC; ATF match")
+                    ? "#ffebee"
                     : statusText.includes("NOT VERIFIED")
                     ? "#fff8e1"
                     : "#eeeeee";
