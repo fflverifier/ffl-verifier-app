@@ -445,11 +445,11 @@ export default function UploadPage() {
               "UPC",
               upcPick,
               "",
-              "UPC not found in catalog; verified via ATF fields"
+              "Invalid or missing UPC; matched by ATF fields"
             );
             return {
               ...baseRow,
-              Status: "NOT VERIFIED ⚠️ (UPC; ATF match)",
+              Status: "NOT VERIFIED ⚠️ (ATF match, UPC invalid)",
               [META_KEY]: meta,
             };
           }
@@ -552,7 +552,10 @@ export default function UploadPage() {
     const total = results.length;
     if (!total) return { total: 0, verified: 0, notVerified: 0, unknown: 0, pv: 0, pnv: 0, pu: 0 };
     const verified = results.filter((r) => String(r.Status).includes("VERIFIED ✅")).length;
-    const notVerified = results.filter((r) => String(r.Status).includes("NOT VERIFIED")).length;
+    const notVerified = results.filter((r) => {
+      const text = String(r.Status);
+      return text.includes("NOT VERIFIED") || text.includes("ATF MATCH");
+    }).length;
     const unknown = results.filter((r) => String(r.Status).includes("UNKNOWN")).length;
     const pct = (n) => Math.round((n / total) * 100);
     return { total, verified, notVerified, unknown, pv: pct(verified), pnv: pct(notVerified), pu: pct(unknown) };
@@ -560,7 +563,7 @@ export default function UploadPage() {
 
   const statusKeyForRow = (status) => {
     const text = String(status || "");
-    if (text.includes("NOT VERIFIED")) return "NOT VERIFIED";
+    if (text.includes("NOT VERIFIED") || text.includes("ATF MATCH")) return "NOT VERIFIED";
     if (text.includes("VERIFIED ✅")) return "VERIFIED";
     return "UNKNOWN";
   };
@@ -637,7 +640,7 @@ export default function UploadPage() {
               {
                 key: "NOT VERIFIED",
                 label: `NOT VERIFIED: ${stats.notVerified} (${stats.pnv}%)`,
-                baseStyle: { background: "#fff8e1", border: "1px solid #ffe082" },
+                baseStyle: { background: "#ffebee", border: "1px solid #ef9a9a" },
               },
               {
                 key: "UNKNOWN",
@@ -711,8 +714,8 @@ export default function UploadPage() {
                   display: "inline-block",
                   width: 12,
                   height: 12,
-                  background: "#fff8e1",
-                  border: "1px solid #ffe082",
+                  background: "#ffebee",
+                  border: "1px solid #ef9a9a",
                   marginRight: 6,
                 }}
               />
@@ -753,10 +756,8 @@ export default function UploadPage() {
                 const bg =
                   statusText.includes("VERIFIED")
                     ? "#e8f5e9"
-                    : statusText.includes("NOT VERIFIED") && statusText.includes("UPC; ATF match")
-                    ? "#ffebee"
                     : statusText.includes("NOT VERIFIED")
-                    ? "#fff8e1"
+                    ? "#ffebee"
                     : "#eeeeee";
                 const rowMeta = r[META_KEY] || {};
                 return (
