@@ -445,11 +445,11 @@ export default function UploadPage() {
               "UPC",
               upcPick,
               "",
-              "Invalid or missing UPC; matched by ATF fields"
+              "UPC not found in catalog; matched by ATF fields"
             );
             return {
               ...baseRow,
-              Status: "NOT VERIFIED ⚠️ (ATF match, UPC invalid)",
+              Status: "NOT VERIFIED ⚠️ (ATF match, UPC unknown)",
               [META_KEY]: meta,
             };
           }
@@ -756,9 +756,9 @@ export default function UploadPage() {
                 const bg =
                   statusText.includes("VERIFIED")
                     ? "#e8f5e9"
-                    : statusText.includes("NOT VERIFIED")
-                    ? "#ffebee"
-                    : "#eeeeee";
+                    : statusText.includes("UNKNOWN")
+                    ? "#eeeeee"
+                    : "#ffebee";
                 const rowMeta = r[META_KEY] || {};
                 return (
                   <tr key={i} style={{ background: bg }}>
@@ -769,13 +769,25 @@ export default function UploadPage() {
                       if (cellMeta?.reason) tooltipParts.push(cellMeta.reason);
                       if (cellMeta?.expected) tooltipParts.push(`Expected: ${cellMeta.expected}`);
                       const title = tooltipParts.length > 0 ? tooltipParts.join(" • ") : undefined;
-                      const cellStyle = isMismatch
-                        ? {
-                            background: "#ffebee",
-                            fontWeight: 600,
-                            border: "1px solid #ef9a9a",
-                          }
-                        : undefined;
+                      const isStatusColumn = header.toLowerCase() === "status";
+                      const emphasizeStatus = isStatusColumn && statusText.includes("NOT VERIFIED");
+                      const highlight = isMismatch || emphasizeStatus;
+                      const neutralUnknown = statusText.includes("UNKNOWN");
+                      let cellStyle;
+                      if (highlight) {
+                        cellStyle = {
+                          background: "#ffebee",
+                          fontWeight: 600,
+                          border: "1px solid #ef9a9a",
+                        };
+                      }
+                      if (neutralUnknown) {
+                        cellStyle = {
+                          background: "#eeeeee",
+                          border: "1px solid #cccccc",
+                          color: "#333",
+                        };
+                      }
                       return (
                         <td key={header} style={cellStyle} title={title}>
                           {String(r[header] ?? "")}
