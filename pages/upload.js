@@ -561,6 +561,24 @@ export default function UploadPage() {
     return { total, verified, notVerified, unknown, pv: pct(verified), pnv: pct(notVerified), pu: pct(unknown) };
   })();
 
+  const statusFilters = [
+    {
+      key: "VERIFIED",
+      label: `VERIFIED: ${stats.verified} (${stats.pv}%)`,
+      baseStyle: { background: "#e8f5e9", border: "1px solid #c8e6c9" },
+    },
+    {
+      key: "NOT VERIFIED",
+      label: `NOT VERIFIED: ${stats.notVerified} (${stats.pnv}%)`,
+      baseStyle: { background: "#ffebee", border: "1px solid #ef9a9a" },
+    },
+    {
+      key: "UNKNOWN",
+      label: `UNKNOWN: ${stats.unknown} (${stats.pu}%)`,
+      baseStyle: { background: "#eeeeee", border: "1px solid #cccccc" },
+    },
+  ];
+
   const statusKeyForRow = (status) => {
     const text = String(status || "");
     if (text.includes("NOT VERIFIED") || text.includes("ATF MATCH")) return "NOT VERIFIED";
@@ -605,93 +623,83 @@ export default function UploadPage() {
     <main style={{ fontFamily: "sans-serif", padding: "40px" }}>
       <h1>FFL Verifier — Upload Tool</h1>
 
-      <input type="file" accept=".csv" onChange={handleFile} />
-      <button
-        onClick={verifyData}
-        disabled={rows.length === 0 || loading}
-        style={{ marginLeft: 10, padding: "6px 12px", cursor: "pointer" }}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 16,
+        }}
       >
-        {loading ? "Verifying..." : "Run Verification"}
-      </button>
+        <input type="file" accept=".csv" onChange={handleFile} />
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button
+            onClick={verifyData}
+            disabled={rows.length === 0 || loading}
+            style={{ padding: "6px 12px", cursor: "pointer" }}
+          >
+            {loading ? "Verifying..." : "Run Verification"}
+          </button>
+          {results.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              {statusFilters.map(({ key, label, baseStyle }) => {
+                const isActive = activeStatusFilters.includes(key);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => toggleStatusFilter(key)}
+                    aria-pressed={isActive}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 999,
+                      cursor: "pointer",
+                      fontSize: 13,
+                      fontWeight: isActive ? 600 : 500,
+                      opacity: isActive ? 1 : 0.5,
+                      transition: "opacity 0.15s ease",
+                      background: baseStyle.background,
+                      border: baseStyle.border,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={resetStatusFilters}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 999,
+                  border: "1px solid #b0bec5",
+                  background: "#f5f5f5",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Show all
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
 
       {error && <p style={{ color: "red", marginTop: 12 }}>{error}</p>}
 
       {results.length > 0 && (
         <div style={{ marginTop: 20 }}>
           <h3>Results ({filteredResults.length} of {results.length} rows)</h3>
-
-          {/* Summary bar */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              flexWrap: "wrap",
-              margin: "8px 0 6px 0",
-              fontSize: 14,
-            }}
+          <button
+            onClick={downloadCSV}
+            style={{ margin: "8px 0 12px 0", padding: "6px 12px", cursor: "pointer" }}
           >
-            {[
-              {
-                key: "VERIFIED",
-                label: `VERIFIED: ${stats.verified} (${stats.pv}%)`,
-                baseStyle: { background: "#e8f5e9", border: "1px solid #c8e6c9" },
-              },
-              {
-                key: "NOT VERIFIED",
-                label: `NOT VERIFIED: ${stats.notVerified} (${stats.pnv}%)`,
-                baseStyle: { background: "#ffebee", border: "1px solid #ef9a9a" },
-              },
-              {
-                key: "UNKNOWN",
-                label: `UNKNOWN: ${stats.unknown} (${stats.pu}%)`,
-                baseStyle: { background: "#eeeeee", border: "1px solid #cccccc" },
-              },
-            ].map(({ key, label, baseStyle }) => {
-              const isActive = activeStatusFilters.includes(key);
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => toggleStatusFilter(key)}
-                  aria-pressed={isActive}
-                  style={{
-                    padding: "6px 12px",
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    fontSize: 14,
-                    fontWeight: isActive ? 600 : 400,
-                    opacity: isActive ? 1 : 0.45,
-                    transition: "opacity 0.15s ease",
-                    background: baseStyle.background,
-                    border: baseStyle.border,
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-            <span style={{ padding: "6px 10px", border: "1px dashed #bbb", borderRadius: 6 }}>
-              TOTAL: <strong>{stats.total}</strong>
-            </span>
-            <button
-              type="button"
-              onClick={resetStatusFilters}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: "1px solid #b0bec5",
-                background: "#f5f5f5",
-                cursor: "pointer",
-                fontSize: 13,
-              }}
-            >
-              Show all
-            </button>
-          </div>
-          <p style={{ fontSize: 12, margin: "0 0 12px 2px", color: "#555" }}>
-            Tip: click a status chip to filter the table below.
-          </p>
+            ⬇️ Download Results CSV
+          </button>
 
           {/* Legend */}
           <div style={{ marginTop: 6, marginBottom: 10, display: "flex", gap: 16, fontSize: 14 }}>
@@ -736,17 +744,14 @@ export default function UploadPage() {
             </span>
           </div>
 
-          {/* Download button */}
-          <button onClick={downloadCSV} style={{ marginBottom: 10, padding: "6px 12px", cursor: "pointer" }}>
-            ⬇️ Download Results CSV
-          </button>
-
           {/* Table */}
           <table border="1" cellPadding="6" style={{ borderCollapse: "collapse", width: "100%" }}>
             <thead>
               <tr>
                 {tableHeaders.map((k) => (
-                  <th key={k} style={{ textAlign: "left" }}>{k}</th>
+                  <th key={k} style={{ textAlign: "left" }}>
+                    {k}
+                  </th>
                 ))}
               </tr>
             </thead>
