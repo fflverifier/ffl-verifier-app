@@ -579,6 +579,23 @@ export default function UploadPage() {
     },
   ];
 
+  const getStatusPill = (statusText) => {
+    const normalized = String(statusText || "");
+    if (normalized.includes("VERIFIED ✅")) {
+      return { icon: "✅", label: "Verified", className: "pill-success" };
+    }
+    if (normalized.includes("ATF match, UPC unknown")) {
+      return { icon: "⚠️", label: "ATF match / UPC unknown", className: "pill-warning" };
+    }
+    if (normalized.includes("NOT VERIFIED")) {
+      return { icon: "🔴", label: "Not verified", className: "pill-error" };
+    }
+    if (normalized.includes("UNKNOWN")) {
+      return { icon: "🛈", label: "Unknown", className: "pill-unknown" };
+    }
+    return { icon: "🛈", label: normalized || "Unknown", className: "pill-unknown" };
+  };
+
   const statusKeyForRow = (status) => {
     const text = String(status || "");
     if (text.includes("NOT VERIFIED") || text.includes("ATF MATCH")) return "NOT VERIFIED";
@@ -744,73 +761,69 @@ export default function UploadPage() {
             </span>
           </div>
 
-          {/* Table */}
-          <table border="1" cellPadding="6" style={{ borderCollapse: "collapse", width: "100%" }}>
-            <thead>
-              <tr>
-                {tableHeaders.map((k) => (
-                  <th key={k} style={{ textAlign: "left" }}>
-                    {k}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filteredResults.map((r, i) => {
-                const statusText = String(r.Status || "");
-                const bg =
-                  statusText.includes("VERIFIED")
-                    ? "#e8f5e9"
-                    : statusText.includes("UNKNOWN")
-                    ? "#eeeeee"
-                    : "#ffebee";
-                const rowMeta = r[META_KEY] || {};
-                return (
-                  <tr key={i} style={{ background: bg }}>
-                    {tableHeaders.map((header) => {
-                      const cellMeta = rowMeta[header];
-                      const isMismatch = cellMeta?.state === "mismatch";
-                      const tooltipParts = [];
-                      if (cellMeta?.reason) tooltipParts.push(cellMeta.reason);
-                      if (cellMeta?.expected) tooltipParts.push(`Expected: ${cellMeta.expected}`);
-                      const title = tooltipParts.length > 0 ? tooltipParts.join(" • ") : undefined;
-                      const isStatusColumn = header.toLowerCase() === "status";
-                      const emphasizeStatus = isStatusColumn && statusText.includes("NOT VERIFIED");
-                      const highlight = isMismatch || emphasizeStatus;
-                      const neutralUnknown = statusText.includes("UNKNOWN");
-                      let cellStyle;
-                      if (highlight) {
-                        cellStyle = {
-                          background: "#ffebee",
-                          fontWeight: 600,
-                          border: "1px solid #ef9a9a",
-                        };
-                      }
-                      if (neutralUnknown) {
-                        cellStyle = {
-                          background: "#eeeeee",
-                          border: "1px solid #cccccc",
-                          color: "#333",
-                        };
-                      }
-                      return (
-                        <td key={header} style={cellStyle} title={title}>
-                          {String(r[header] ?? "")}
-                        </td>
-                      );
-                    })}
+          <div className="result-card">
+            <div className="result-scroll">
+              <table className="result-table">
+                <thead>
+                  <tr>
+                    {tableHeaders.map((k) => (
+                      <th key={k} style={{ textAlign: "left" }}>
+                        {k}
+                      </th>
+                    ))}
                   </tr>
-                );
-              })}
-              {filteredResults.length === 0 && (
-                <tr>
-                  <td colSpan={tableHeaders.length} style={{ padding: 12, textAlign: "center", fontStyle: "italic", color: "#666" }}>
-                    No rows match the selected filters.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                </thead>
+                <tbody>
+                  {filteredResults.map((r, i) => {
+                    const statusText = String(r.Status || "");
+                    const rowMeta = r[META_KEY] || {};
+                    return (
+                      <tr key={i}>
+                        {tableHeaders.map((header) => {
+                          const cellMeta = rowMeta[header];
+                          const isMismatch = cellMeta?.state === "mismatch";
+                          const tooltipParts = [];
+                          if (cellMeta?.reason) tooltipParts.push(cellMeta.reason);
+                          if (cellMeta?.expected) tooltipParts.push(`Expected: ${cellMeta.expected}`);
+                          const title = tooltipParts.length > 0 ? tooltipParts.join(" • ") : undefined;
+                          const isStatusColumn = header.toLowerCase() === "status";
+                          const pill = isStatusColumn ? getStatusPill(statusText) : null;
+                          return (
+                            <td key={header} title={title}>
+                              {isStatusColumn ? (
+                                <span className={`status-pill ${pill.className}`}>
+                                  <span className="pill-icon" aria-hidden="true">
+                                    {pill.icon}
+                                  </span>
+                                  <span>{pill.label}</span>
+                                </span>
+                              ) : (
+                                <>
+                                  {String(r[header] ?? "")}
+                                  {isMismatch && (
+                                    <div className="cell-note">
+                                      {cellMeta?.reason || (cellMeta?.expected ? `Expected: ${cellMeta.expected}` : "Mismatch")}
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                  {filteredResults.length === 0 && (
+                    <tr>
+                      <td colSpan={tableHeaders.length} style={{ padding: 12, textAlign: "center", fontStyle: "italic", color: "#666" }}>
+                        No rows match the selected filters.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
 
           {/* Debug panel */}
           {debugInfo && (
@@ -833,6 +846,109 @@ export default function UploadPage() {
           )}
         </div>
       )}
+
+      <style jsx>{`
+        .status-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 12px;
+          border-radius: 999px;
+          font-weight: 600;
+          font-size: 13px;
+          letter-spacing: 0.01em;
+        }
+
+        .pill-icon {
+          font-size: 14px;
+        }
+
+        .pill-success {
+          background: #e6f7ed;
+          color: #166534;
+        }
+
+        .pill-warning {
+          background: #fff4e5;
+          color: #aa5b00;
+        }
+
+        .pill-error {
+          background: #ffe5e9;
+          color: #b42318;
+        }
+
+        .pill-unknown {
+          background: #edf1f5;
+          color: #475467;
+        }
+
+        .cell-note {
+          margin-top: 4px;
+          font-size: 12px;
+          color: #b42318;
+          font-weight: 500;
+        }
+
+        .result-card {
+          border: 1px solid #d8e0eb;
+          border-radius: 12px;
+          box-shadow: 0 18px 24px -18px rgba(15, 23, 42, 0.35);
+          background: #ffffff;
+          overflow: hidden;
+        }
+
+        .result-scroll {
+          max-height: 70vh;
+          overflow: auto;
+        }
+
+        .result-table {
+          width: 100%;
+          border-collapse: separate;
+          border-spacing: 0;
+        }
+
+        .result-table thead th {
+          position: sticky;
+          top: 0;
+          background: #f7f9fc;
+          font-size: 12px;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: #1f2937;
+          padding: 12px 16px;
+          border-bottom: 1px solid #dfe4ec;
+          z-index: 1;
+        }
+
+        .result-table tbody td {
+          padding: 14px 16px;
+          font-size: 14px;
+          color: #1f2937;
+          border-bottom: 1px solid #eef2f8;
+        }
+
+        .result-table tbody tr:last-child td {
+          border-bottom: none;
+        }
+
+        .result-table tbody tr:hover td {
+          background: #f9fbff;
+        }
+
+        @media (max-width: 720px) {
+          .result-table thead th,
+          .result-table tbody td {
+            padding: 10px;
+          }
+
+          .status-pill {
+            padding: 4px 10px;
+            font-size: 12px;
+          }
+        }
+      `}</style>
     </main>
   );
 }
